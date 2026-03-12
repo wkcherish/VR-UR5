@@ -479,7 +479,15 @@ if __name__ == "__main__":
                         help='启动 MuJoCo 可视化窗口')
     args = parser.parse_args()
 
-    viewer_enabled = args.viewer
+    # 如果没有使用 --viewer 参数，则提示用户选择
+    if not args.viewer:
+        print("\n" + "=" * 60)
+        print("UR5 MuJoCo 仿真服务器")
+        print("=" * 60)
+        response = input("\n是否启动 MuJoCo 可视化窗口？(yes/no): ").strip().lower()
+        viewer_enabled = response in ['yes', 'y']
+    else:
+        viewer_enabled = True
 
     print("\n" + "=" * 60)
     print("UR5 MuJoCo 仿真服务器")
