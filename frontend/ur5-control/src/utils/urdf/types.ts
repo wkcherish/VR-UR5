@@ -8,9 +8,16 @@ export interface UrdfGeometry {
   scale: [number, number, number]
 }
 
+export interface UrdfMaterial {
+  name?: string
+  color?: [number, number, number, number]
+  texture?: string
+}
+
 export interface UrdfVisual {
   origin: UrdfOrigin
   geometry: UrdfGeometry
+  material?: UrdfMaterial
 }
 
 export interface UrdfCollision {

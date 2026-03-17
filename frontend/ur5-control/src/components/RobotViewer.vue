@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { SceneManager } from '../utils/scene/SceneManager'
 import { loadRobotFromUrdf, updateRobotJoints } from '../utils/urdf/robotLoader'
@@ -54,6 +54,11 @@ const initRobot = async () => {
   if (!sceneManager) {
     return
   }
+  if (robotRoot) {
+    sceneManager.scene.remove(robotRoot)
+    robotRoot = null
+    robotModel = null
+  }
   loading.value = true
   error.value = ''
   meshStatus.value = ''
@@ -64,10 +69,11 @@ const initRobot = async () => {
     sceneManager.scene.add(robotRoot)
     const loaded = robotModel.meshReport.totalLoaded
     const missingCount = robotModel.meshReport.missingLinks.length
+    const modeText = props.useCollisionMesh ? 'collision' : 'visual'
     meshStatus.value =
       missingCount > 0
-        ? `mesh 已加载 ${loaded} 个，缺失 ${missingCount} 个 link`
-        : `mesh 已加载 ${loaded} 个`
+        ? `${modeText} mesh 已加载 ${loaded} 个，缺失 ${missingCount} 个 link`
+        : `${modeText} mesh 已加载 ${loaded} 个`
   } catch (err) {
     error.value = err instanceof Error ? err.message : '机器人加载失败'
   } finally {
@@ -84,6 +90,13 @@ onMounted(async () => {
   window.addEventListener('resize', handleResize)
   await initRobot()
 })
+
+watch(
+  () => [props.urdfUrl, props.useCollisionMesh],
+  async () => {
+    await initRobot()
+  },
+)
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)

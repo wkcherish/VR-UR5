@@ -2,6 +2,7 @@ import type {
   UrdfCollision,
   UrdfJoint,
   UrdfLink,
+  UrdfMaterial,
   UrdfOrigin,
   UrdfRobot,
   UrdfVisual,
@@ -29,6 +30,18 @@ const parseScale = (raw: string | null | undefined): [number, number, number] =>
   return [values[0] || 1, values[1] || 1, values[2] || 1]
 }
 
+const parseRgba = (raw: string | null | undefined): [number, number, number, number] | undefined => {
+  if (!raw) {
+    return undefined
+  }
+  const values = raw
+    .trim()
+    .split(/\s+/)
+    .map((value) => Number(value))
+  const rgba: [number, number, number, number] = [values[0] || 0, values[1] || 0, values[2] || 0, values[3] ?? 1]
+  return rgba
+}
+
 const parseOrigin = (element: Element | null): UrdfOrigin => {
   if (!element) {
     return { xyz: [0, 0, 0], rpy: [0, 0, 0] }
@@ -39,18 +52,37 @@ const parseOrigin = (element: Element | null): UrdfOrigin => {
   }
 }
 
+const parseMaterial = (element: Element): UrdfMaterial | undefined => {
+  const materialElement = element.querySelector('material')
+  if (!materialElement) {
+    return undefined
+  }
+  const color = parseRgba(materialElement.querySelector('color')?.getAttribute('rgba'))
+  const texture = materialElement.querySelector('texture')?.getAttribute('filename') || undefined
+  const name = materialElement.getAttribute('name') || undefined
+  if (!color && !texture && !name) {
+    return undefined
+  }
+  return { color, texture, name }
+}
+
 const parseVisual = (element: Element): UrdfVisual | null => {
   const mesh = element.querySelector('geometry > mesh')
   const filename = mesh?.getAttribute('filename')
   if (!mesh || !filename) {
     return null
   }
+  const origin = parseOrigin(element.querySelector('origin'))
   return {
-    origin: parseOrigin(element.querySelector('origin')),
+    origin: {
+      xyz: [origin.xyz[0], origin.xyz[1], origin.xyz[2]],
+      rpy: [origin.rpy[0], origin.rpy[1], origin.rpy[2]],
+    },
     geometry: {
       filename,
       scale: parseScale(mesh.getAttribute('scale')),
     },
+    material: parseMaterial(element),
   }
 }
 

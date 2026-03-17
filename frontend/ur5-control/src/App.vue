@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import RobotViewer from './components/RobotViewer.vue'
 
 type JointName =
@@ -11,6 +11,9 @@ type JointName =
   | 'wrist_3_joint'
 
 const viewerRef = ref<InstanceType<typeof RobotViewer> | null>(null)
+const useCollisionMesh = ref(false)
+const isPoseTesting = ref(false)
+let poseTimer: number | null = null
 
 const joints = reactive<Record<JointName, number>>({
   shoulder_pan_joint: 0,
@@ -43,16 +46,81 @@ const resetJoints = () => {
     joints[key] = 0
   }
 }
+
+const poseSequence: Array<Record<JointName, number>> = [
+  {
+    shoulder_pan_joint: 0,
+    shoulder_lift_joint: -1.57,
+    elbow_joint: 1.57,
+    wrist_1_joint: 0,
+    wrist_2_joint: 0,
+    wrist_3_joint: 0,
+  },
+  {
+    shoulder_pan_joint: 0.8,
+    shoulder_lift_joint: -1.2,
+    elbow_joint: 0.9,
+    wrist_1_joint: -0.7,
+    wrist_2_joint: 0.5,
+    wrist_3_joint: -0.9,
+  },
+  {
+    shoulder_pan_joint: -1.3,
+    shoulder_lift_joint: 0.8,
+    elbow_joint: -1.2,
+    wrist_1_joint: 1.5,
+    wrist_2_joint: -1.1,
+    wrist_3_joint: 0.4,
+  },
+]
+
+const stopPoseTest = () => {
+  if (poseTimer !== null) {
+    window.clearInterval(poseTimer)
+    poseTimer = null
+  }
+  isPoseTesting.value = false
+}
+
+const startPoseTest = () => {
+  let index = 0
+  isPoseTesting.value = true
+  for (const jointName of Object.keys(joints) as JointName[]) {
+    joints[jointName] = poseSequence[0][jointName]
+  }
+  poseTimer = window.setInterval(() => {
+    index = (index + 1) % poseSequence.length
+    for (const jointName of Object.keys(joints) as JointName[]) {
+      joints[jointName] = poseSequence[index][jointName]
+    }
+  }, 1200)
+}
+
+const togglePoseTest = () => {
+  if (isPoseTesting.value) {
+    stopPoseTest()
+    return
+  }
+  startPoseTest()
+}
+
+onUnmounted(() => {
+  stopPoseTest()
+})
 </script>
 
 <template>
   <main class="app-layout">
     <section class="viewer-panel">
-      <RobotViewer ref="viewerRef" />
+      <RobotViewer ref="viewerRef" :use-collision-mesh="useCollisionMesh" />
     </section>
     <aside class="control-panel">
       <h1>UR5 3D 可视化</h1>
       <p class="panel-subtitle">阶段 2：场景管理、URDF 解析、关节联动</p>
+      <label class="mesh-mode">
+        <input v-model="useCollisionMesh" type="checkbox" />
+        使用 collision mesh（用于连接完整性验证）
+      </label>
       <div class="joint-list">
         <label v-for="[name, value] in jointList" :key="name" class="joint-item">
           <span>{{ name }}</span>
@@ -68,6 +136,9 @@ const resetJoints = () => {
       </div>
       <div class="panel-actions">
         <button type="button" @click="resetJoints">归零</button>
+        <button type="button" @click="togglePoseTest">
+          {{ isPoseTesting ? '停止运动测试' : '运行运动测试' }}
+        </button>
         <button type="button" @click="viewerRef?.resetCamera()">重置视角</button>
       </div>
     </aside>
