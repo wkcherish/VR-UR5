@@ -11,7 +11,6 @@ type JointName =
   | 'wrist_3_joint'
 
 const viewerRef = ref<InstanceType<typeof RobotViewer> | null>(null)
-const useCollisionMesh = ref(false)
 const isPoseTesting = ref(false)
 let poseTimer: number | null = null
 
@@ -112,15 +111,10 @@ onUnmounted(() => {
 <template>
   <main class="app-layout">
     <section class="viewer-panel">
-      <RobotViewer ref="viewerRef" :use-collision-mesh="useCollisionMesh" />
+      <RobotViewer ref="viewerRef" />
     </section>
     <aside class="control-panel">
       <h1>UR5 3D 可视化</h1>
-      <p class="panel-subtitle">阶段 2：场景管理、URDF 解析、关节联动</p>
-      <label class="mesh-mode">
-        <input v-model="useCollisionMesh" type="checkbox" />
-        使用 collision mesh（用于连接完整性验证）
-      </label>
       <div class="joint-list">
         <label v-for="[name, value] in jointList" :key="name" class="joint-item">
           <span>{{ name }}</span>

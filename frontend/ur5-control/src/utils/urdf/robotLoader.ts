@@ -82,6 +82,16 @@ const getObjectCenterDistance = (object: THREE.Object3D) => {
   return center.length()
 }
 
+export const normalizeColladaSceneOrientation = (scene: THREE.Object3D) => {
+  if (
+    Math.abs(scene.rotation.x + halfPi) < epsilon
+    && Math.abs(scene.rotation.y) < epsilon
+    && Math.abs(scene.rotation.z) < epsilon
+  ) {
+    scene.rotation.set(0, 0, 0)
+  }
+}
+
 const loadVisualMesh = async (filename: string) => {
   const path = normalizeMeshPath(filename)
   try {
@@ -90,13 +100,7 @@ const loadVisualMesh = async (filename: string) => {
       if (!collada) {
         return null
       }
-      if (
-        Math.abs(collada.scene.rotation.x + halfPi) < epsilon
-        && Math.abs(collada.scene.rotation.y) < epsilon
-        && Math.abs(collada.scene.rotation.z) < epsilon
-      ) {
-        collada.scene.rotation.set(0, 0, 0)
-      }
+      normalizeColladaSceneOrientation(collada.scene)
       setMeshShadow(collada.scene)
       return collada.scene
     }
@@ -313,6 +317,7 @@ export const loadRobotFromUrdf = async (url: string, useCollisionMesh = false) =
   const root = new THREE.Group()
   root.name = robot.name
   root.add(rootLink)
+  root.rotation.x = -Math.PI / 2
 
   return {
     root,

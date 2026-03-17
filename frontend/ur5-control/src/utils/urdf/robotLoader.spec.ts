@@ -2,7 +2,13 @@ import * as THREE from 'three'
 import { describe, expect, it } from 'vitest'
 import ur5Raw from '../../../public/models/ur5.urdf?raw'
 import { parseUrdf } from './parser'
-import { attachJoint, createVisualMeshNode, toUrdfQuaternion, updateRobotJoints } from './robotLoader'
+import {
+  attachJoint,
+  createVisualMeshNode,
+  normalizeColladaSceneOrientation,
+  toUrdfQuaternion,
+  updateRobotJoints,
+} from './robotLoader'
 
 const matrixElementsAlmostEqual = (a: THREE.Matrix4, b: THREE.Matrix4, epsilon = 1e-6) =>
   a.elements.every((value, index) => Math.abs(value - b.elements[index]) < epsilon)
@@ -101,6 +107,15 @@ describe('URDF visual origin flow', () => {
     expect(worldPosition.x).toBeCloseTo(0.12)
     expect(worldPosition.y).toBeCloseTo(-0.34)
     expect(worldPosition.z).toBeCloseTo(0.56)
+  })
+
+  it('normalizes Collada Z_UP auto-rotation for URDF kinematic consistency', () => {
+    const scene = new THREE.Group()
+    scene.rotation.set(-Math.PI / 2, 0, 0)
+    normalizeColladaSceneOrientation(scene)
+    expect(scene.rotation.x).toBeCloseTo(0)
+    expect(scene.rotation.y).toBeCloseTo(0)
+    expect(scene.rotation.z).toBeCloseTo(0)
   })
 
   it('keeps parent-child transforms consistent across multiple poses', () => {

@@ -24,7 +24,6 @@ const props = withDefaults(
 const containerRef = ref<HTMLElement | null>(null)
 const loading = ref(true)
 const error = ref('')
-const meshStatus = ref('')
 
 let sceneManager: SceneManager | null = null
 let robotModel: RobotModel | null = null
@@ -61,19 +60,11 @@ const initRobot = async () => {
   }
   loading.value = true
   error.value = ''
-  meshStatus.value = ''
 
   try {
     robotModel = await loadRobotFromUrdf(props.urdfUrl, props.useCollisionMesh)
     robotRoot = robotModel.root
     sceneManager.scene.add(robotRoot)
-    const loaded = robotModel.meshReport.totalLoaded
-    const missingCount = robotModel.meshReport.missingLinks.length
-    const modeText = props.useCollisionMesh ? 'collision' : 'visual'
-    meshStatus.value =
-      missingCount > 0
-        ? `${modeText} mesh 已加载 ${loaded} 个，缺失 ${missingCount} 个 link`
-        : `${modeText} mesh 已加载 ${loaded} 个`
   } catch (err) {
     error.value = err instanceof Error ? err.message : '机器人加载失败'
   } finally {
@@ -120,7 +111,6 @@ defineExpose<RobotViewerExpose>({
     <div ref="containerRef" class="viewer-canvas"></div>
     <div v-if="loading" class="viewer-state">正在加载 UR5 模型...</div>
     <div v-else-if="error" class="viewer-error">{{ error }}</div>
-    <div v-else-if="meshStatus" class="viewer-state">{{ meshStatus }}</div>
   </div>
 </template>
 
