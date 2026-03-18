@@ -1,4 +1,4 @@
-# UR5 机器人 AR 控制前端开发任务清单
+ # UR5 机器人 AR 控制前端开发任务清单
 
 ## 📋 项目概述
 基于 Vue 3 + Three.js 实现 UR5 机器人的 Web 端可视化，集成 Quest 3 AR 手柄控制，通过局域网与后端 FastAPI+MuJoCo 仿真环境实时通信。
@@ -276,68 +276,111 @@ frontend/ur5-control/
 
 ---
 
-### **阶段 4: AR 手柄集成**
+### **阶段 4: AR 手柄集成与 VR 交互**
 
-#### Task 4.1: 创建 WebXR 管理器
+#### Task 4.1: WebXR 与 VR 模式基础
 
 **技术实现细节**：
-1. 检查浏览器 WebXR 支持性（navigator.xr）
-2. 配置 Three.js 渲染器启用 XR（renderer.xr.enabled = true）
-3. 获取控制器对象（renderer.xr.getController(0/1)）
-4. 监听控制器事件（selectstart、selectend）
-5. 实现 AR 会话启动和退出逻辑
+1. **WebXR 初始化**：
+   - 检查 `navigator.xr.isSessionSupported('immersive-vr')` 确认设备支持
+   - 配置 Three.js 渲染器启用 XR：`renderer.xr.enabled = true`
+   - 添加"进入 VR 模式" / "退出 VR 模式" 按钮，绑定 session 请求逻辑
+2. **控制器与手部追踪设置**：
+   - 初始化控制器：`renderer.xr.getController(0)` (左) 和 `renderer.xr.getController(1)` (右)
+   - 初始化手柄模型：`renderer.xr.getControllerGrip(0/1)` 加载 Quest 3 手柄模型
+   - (可选) 初始化手部追踪：使用 `THREE.HandInput` 支持裸手操作
+3. **VR 场景优化**：
+   - 设置 VR 模式下的相机偏移（确保视角高度正确）
+   - 添加地面网格和环境参照物
 
 **注意事项**：
-- ⚠️ **浏览器兼容性**：仅 Meta Quest Browser 完全支持
-- ⚠️ **HTTPS 要求**：某些 WebXR 特性需要 HTTPS 环境
-- ⚠️ **权限申请**：首次使用需用户授权访问 XR 设备
-- ⚠️ **手柄模型**：可用简单几何体表示手柄，增强视觉反馈
-
-**关键 API**：
-- `navigator.xr.isSessionSupported('immersive-ar')`
-- `xr.requestSession('immersive-ar', options)`
-- `renderer.xr.setSession(session)`
+- ⚠️ **HTTPS 要求**：WebXR 必须在 HTTPS 或 localhost 环境下运行
+- ⚠️ **Quest 3 浏览器**：需使用 Meta Quest Browser 进行测试
+- ⚠️ **交互对齐**：确保虚拟手柄位置与真实手柄位置对齐
 
 ---
 
-#### Task 4.2: 创建 AR 控制器组件
+#### Task 4.2: VR 界面与交互模式切换
 
 **技术实现细节**：
-1. 显示 AR 支持性检测结果
-2. 提供"进入 AR 模式"按钮
-3. AR 模式中显示手柄状态（连接状态、电量等）
-4. 实时追踪手柄位姿并发送到父组件
+1. **VR 内 UI 面板**：
+   - 创建随视线或手柄移动的 3D UI 面板 (使用 HTMLMesh 或 CanvasTexture)
+   - 显示当前控制模式、连接状态、关节角度数值
+2. **手/手柄切换逻辑**：
+   - 实现"手柄模式"与"手势模式"的切换开关
+   - 监听输入源变化 (`inputsourceschange`) 自动识别当前激活的输入设备
+   - 在 UI 中提供手动切换按钮，根据选择隐藏/显示手柄模型或手部模型
+3. **视觉反馈**：
+   - 当按下左手柄特定按键时，高亮显示对应的机械臂关节
+   - 摇杆操作时显示方向指示箭头
 
 **注意事项**：
-- ⚠️ **UI 层级**：AR 控件使用 fixed 定位，z-index 设为最高
-- ⚠️ **状态反馈**：明确显示 AR 启动成功/失败
-- ⚠️ **退出机制**：提供明显的退出 AR 按钮
-- ⚠️ **性能监控**：AR 模式下关注帧率和发热情况
+- ⚠️ **UI 可读性**：VR 中文字需足够大，避免过于密集的排版
+- ⚠️ **防晕动设计**：UI 面板运动需平滑，避免剧烈抖动
 
 ---
 
-#### Task 4.3: 实现手柄到关节的映射
+#### Task 4.3: 实现基于 Quest 3 手柄的关节控制映射
+
+**核心逻辑**：
+采用 **左手柄选择模式 + 右手柄执行动作** 的组合控制方案（参考用户定义映射）。
 
 **技术实现细节**：
-1. **映射策略设计**：
-   - 左手柄 X/Y 轴 → 基座旋转 + 肩部俯仰
-   - 右手柄 X/Y 轴 → 肘部 + 腕部 1
-   - 扳机键/旋钮 → 腕部 2/3 微调
-2. **位姿解算**：从手柄 position 和 quaternion 提取欧拉角
-3. **缩放系数**：手柄移动距离乘以系数（如 0.5）映射到关节角度
-4. **限位检查**：确保目标角度在 UR5 关节限位内
+1. **输入轮询循环**：
+   - 在 `renderer.setAnimationLoop` 中每一帧获取 Gamepad 数据
+   - 获取左手柄按键状态 (Buttons) 和右手柄摇杆数据 (Axes)
+
+2. **运动执行逻辑**：
+   - 读取右手柄摇杆数据：`stickX = gamepad.axes[2]` (左右), `stickY = gamepad.axes[3]` (上下)
+   - **死区处理**：忽略绝对值小于 0.1 的输入
+   - **映射规则**：
+     - **底座控制 (Shoulder Pan)**: 按住左手柄 **X键** + 右手柄摇杆 **上下**
+     - **肩部控制 (Shoulder Lift)**: 按住左手柄 **X键** + 右手柄摇杆 **左右**
+     - **肘部控制 (Elbow)**: 按住左手柄 **Y键** + 右手柄摇杆 **上下**
+     - **腕部关节1 (Wrist 1)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **上下**
+     - **腕部关节2 (Wrist 2)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **左右**
+     - **手腕旋转 (Wrist 3)**: 按住左手柄 **Trigger键 (扳机)** + 右手柄摇杆 **左右**
+
+3. **指令发送**：
+   - 将计算出的角度增量应用到当前目标角度
+   - 通过 API/WebSocket 发送控制指令
 
 **注意事项**：
-- ⚠️ **映射直观性**：确保手柄动作与机械臂运动方向一致
-- ⚠️ **死区处理**：设置小范围死区避免抖动
-- ⚠️ **平滑滤波**：使用低通滤波平滑手柄输入
-- ⚠️ **安全限位**：严格遵守 UR5 关节限位（±π）
+- ⚠️ **按键互斥**：处理同时按下多个功能键的情况（优先级策略：Trigger > Grip > Y > X）
+- ⚠️ **安全限位**：在前端严格限制目标角度在 UR5 物理限位内
+- ⚠️ **平滑处理**：对摇杆输入进行低通滤波，避免机械臂抖动
 
-**UR5 关节限位参考**：
-- shoulder_pan: [-π, π]
-- shoulder_lift: [-π, π]
-- elbow: [-π, π]
-- wrist_1/2/3: [-π, π]
+**关键代码参考**：
+```typescript
+// 伪代码示例：基于 WebXR Gamepad API
+const leftPad = leftController.gamepad;   // 左手柄
+const rightPad = rightController.gamepad; // 右手柄
+
+const stickX = rightPad.axes[2]; // 右手摇杆左右
+const stickY = rightPad.axes[3]; // 右手摇杆上下
+
+// 优先级：Trigger > Grip > Y > X
+if (leftPad.buttons[0].pressed) { // Trigger (扳机)
+    // 腕部旋转 (Wrist 3) - 左右推
+    targetJoints.wrist3 += stickX * speed;
+} 
+else if (leftPad.buttons[1].pressed) { // Grip (侧键)
+    // 腕部关节1 (Wrist 1) - 上下推
+    targetJoints.wrist1 += stickY * speed;
+    // 腕部关节2 (Wrist 2) - 左右推
+    targetJoints.wrist2 += stickX * speed;
+}
+else if (leftPad.buttons[5].pressed) { // Y Button (通常 index 5)
+    // 肘部控制 (Elbow) - 上下推
+    targetJoints.elbow += stickY * speed;
+} 
+else if (leftPad.buttons[4].pressed) { // X Button (通常 index 4)
+    // 底座控制 (Shoulder Pan) - 上下推
+    targetJoints.shoulderPan += stickY * speed;
+    // 肩部控制 (Shoulder Lift) - 左右推
+    targetJoints.shoulderLift += stickX * speed;
+}
+```
 
 ---
 
