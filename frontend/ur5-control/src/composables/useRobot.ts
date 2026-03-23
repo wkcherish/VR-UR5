@@ -9,8 +9,17 @@ interface UseRobotOptions {
 export const useRobot = (options: UseRobotOptions = {}) => {
   const { pollingInterval = 100 } = options
   const store = useRobotStore()
-  const { isConnected, isLoading, isFetchingState, isSendingCommand, error, currentState, targetAngles, lastUpdatedAt } =
-    storeToRefs(store)
+  const {
+    isConnected,
+    isLoading,
+    isFetchingState,
+    isSendingCommand,
+    error,
+    currentState,
+    targetAngles,
+    targetGripperPosition,
+    lastUpdatedAt,
+  } = storeToRefs(store)
 
   let pollingTimer: number | null = null
 
@@ -60,6 +69,7 @@ export const useRobot = (options: UseRobotOptions = {}) => {
     error,
     currentState,
     targetAngles,
+    targetGripperPosition,
     lastUpdatedAt,
     startPolling,
     stopPolling,

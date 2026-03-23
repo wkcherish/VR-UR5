@@ -11,15 +11,28 @@ const {
   sendCommand,
   reset,
   setTargetAngle,
+  setTargetGripperPosition,
   isConnected,
   isLoading,
   error,
   currentState,
   targetAngles,
+  targetGripperPosition,
   lastUpdatedAt,
 } = useRobot({ pollingInterval: 50 })
 
 const COMMAND_DEBOUNCE_MS = 80
+const GRIPPER_MIN = 0
+const GRIPPER_MAX = 0.9
+const GRIPPER_STEP = 0.01
+const GRIPPER_JOINT_NAMES = [
+  'left_driver_joint',
+  'right_driver_joint',
+  'left_spring_link_joint',
+  'right_spring_link_joint',
+  'left_follower_joint',
+  'right_follower_joint',
+] as const
 let queuedCommandTimer: number | null = null
 
 const jointList = computed(() =>
@@ -36,6 +49,14 @@ const lastUpdatedLabel = computed(() => {
     return '--'
   }
   return new Date(lastUpdatedAt.value).toLocaleTimeString()
+})
+
+const gripperCurrent = computed(() => {
+  const value = currentState.value?.gripper_position
+  if (value === null || value === undefined) {
+    return targetGripperPosition.value
+  }
+  return value
 })
 
 const clearQueuedCommand = () => {
@@ -64,21 +85,44 @@ const queueCommand = () => {
   }, COMMAND_DEBOUNCE_MS)
 }
 
+const appendGripperJoints = (jointAngles: Record<string, number>, gripperPosition: number) => {
+  for (const jointName of GRIPPER_JOINT_NAMES) {
+    jointAngles[jointName] = gripperPosition
+  }
+}
+
+const previewViewerFromTargets = () => {
+  const nextAngles: Record<string, number> = {}
+  for (const jointName of JOINT_ORDER) {
+    nextAngles[jointName] = targetAngles.value[jointName]
+  }
+  appendGripperJoints(nextAngles, targetGripperPosition.value)
+  viewerRef.value?.updateJoints(nextAngles)
+}
+
 const handleAngleInput = (jointName: JointName, value: number) => {
   setTargetAngle(jointName, value)
+  previewViewerFromTargets()
+  queueCommand()
+}
+
+const handleGripperInput = (value: number) => {
+  setTargetGripperPosition(value)
+  previewViewerFromTargets()
   queueCommand()
 }
 
 watch(
-  () => currentState.value?.joints,
-  (joints) => {
-    if (!joints?.length) {
+  () => [currentState.value?.joints, currentState.value?.gripper_position] as const,
+  ([joints, gripperPosition]) => {
+    if (!joints?.length && (gripperPosition === null || gripperPosition === undefined)) {
       return
     }
     const nextAngles: Record<string, number> = {}
-    for (const joint of joints) {
+    for (const joint of joints ?? []) {
       nextAngles[joint.joint_name] = joint.position
     }
+    appendGripperJoints(nextAngles, gripperPosition ?? targetGripperPosition.value)
     viewerRef.value?.updateJoints(nextAngles)
   },
   { immediate: true, deep: true },
@@ -120,6 +164,22 @@ onUnmounted(() => {
           />
           <span class="joint-value">
             目标 {{ joint.target.toFixed(2) }} rad / 当前 {{ joint.current.toFixed(2) }} rad
+          </span>
+        </label>
+        <label class="joint-item">
+          <span>gripper_joint</span>
+          <input
+            :value="targetGripperPosition"
+            type="range"
+            :min="GRIPPER_MIN"
+            :max="GRIPPER_MAX"
+            :step="GRIPPER_STEP"
+            :disabled="!isConnected || isLoading"
+            @input="handleGripperInput(Number(($event.target as HTMLInputElement).value))"
+            @change="handleSendCommand"
+          />
+          <span class="joint-value">
+            目标 {{ targetGripperPosition.toFixed(2) }} rad / 当前 {{ gripperCurrent.toFixed(2) }} rad
           </span>
         </label>
       </div>

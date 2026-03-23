@@ -24,6 +24,29 @@ viewer_thread = None    # 可视化线程
 viewer_handle = None    # launch_passive 返回的 viewer 句柄
 simulation_lock = threading.Lock()
 simulation_task = None  # 后台仿真任务
+GRIPPER_ANGLE_MIN = 0.0
+GRIPPER_ANGLE_MAX = 0.9
+GRIPPER_CTRL_MIN = 0.0
+GRIPPER_CTRL_MAX = 255.0
+
+
+def normalize_gripper_target(raw_target: float) -> tuple[float, float]:
+    """
+    将手抓输入统一为:
+    1) gripper 关节角度（rad，0~0.9）
+    2) MuJoCo 执行器控制量（0~255）
+
+    兼容旧协议：当输入大于 0.9 时，按 0~255 控制量解释。
+    """
+    value = float(raw_target)
+    if value > GRIPPER_ANGLE_MAX:
+        ctrl = float(np.clip(value, GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX))
+        angle = float(np.interp(ctrl, [GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX], [GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX]))
+        return angle, ctrl
+
+    angle = float(np.clip(value, GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX))
+    ctrl = float(np.interp(angle, [GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX], [GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX]))
+    return angle, ctrl
 
 
 # ==================== Pydantic 模型 ====================
@@ -328,16 +351,16 @@ async def get_robot_state():
                     qpos_list.append(position)
                     qvel_list.append(velocity)
 
-        gripper_position = None
-        gripper_joint_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_JOINT,
-            "left_driver_joint"
-        )
-        if gripper_joint_id >= 0:
-            gripper_qpos_idx = model.jnt_qposadr[gripper_joint_id]
-            if gripper_qpos_idx >= 0:
-                gripper_position = float(data.qpos[gripper_qpos_idx])
+            gripper_position = None
+            gripper_joint_id = mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                "left_driver_joint"
+            )
+            if gripper_joint_id >= 0:
+                gripper_qpos_idx = model.jnt_qposadr[gripper_joint_id]
+                if gripper_qpos_idx >= 0:
+                    gripper_position = float(data.qpos[gripper_qpos_idx])
 
         return RobotState(
             joints=states,
@@ -354,7 +377,7 @@ async def get_robot_state():
 async def set_robot_control(control_input: ControlInput):
     """
     设置机器人控制指令
-    接收 6 个机械臂目标角度，并可选控制 gripper 开合
+    接收 6 个机械臂目标角度，并可选控制 gripper 开合（角度 0~0.9 rad）
     """
     if model is None or data is None:
         raise HTTPException(status_code=503, detail="仿真未初始化")
@@ -394,16 +417,16 @@ async def set_robot_control(control_input: ControlInput):
                     # 设置目标位置到 ctrl 数组
                     data.ctrl[actuator_id] = arm_targets[i]
 
+            gripper_angle = None
             if gripper_target is not None:
+                gripper_angle, gripper_ctrl = normalize_gripper_target(gripper_target)
                 gripper_actuator_id = mujoco.mj_name2id(
                     model,
                     mujoco.mjtObj.mjOBJ_ACTUATOR,
                     "fingers_actuator"
                 )
                 if gripper_actuator_id >= 0:
-                    data.ctrl[gripper_actuator_id] = float(
-                        np.clip(gripper_target, 0.0, 255.0)
-                    )
+                    data.ctrl[gripper_actuator_id] = gripper_ctrl
 
             # 前向动力学计算并同步 viewer
             mujoco.mj_forward(model, data)
@@ -416,7 +439,7 @@ async def set_robot_control(control_input: ControlInput):
             "status": "success",
             "message": "已更新机械臂目标角度" + ("与 gripper 开合" if gripper_target is not None else ""),
             "target_angles": arm_targets,
-            "gripper_position": gripper_target,
+            "gripper_position": gripper_angle,
             "current_ctrl": current_ctrl
         }
 
