@@ -5,7 +5,7 @@
     <mesh name="base" content_type="model/stl" file="base.stl"/>
     <mesh name="shoulder" content_type="model/stl" file="shoulder.stl"/>
     <mesh name="upperarm" content_type="model/stl" file="upperarm.stl"/>
-    <mesh name="forearm" content_type="model/stl" file="forearm.stl"/>
+    <mesh name="forearm" content_type="model/stl" file="forearm.stl"/>git 
     <mesh name="wrist1" content_type="model/stl" file="wrist1.stl"/>
     <mesh name="wrist2" content_type="model/stl" file="wrist2.stl"/>
     <mesh name="wrist3" content_type="model/stl" file="wrist3.stl"/>
@@ -55,12 +55,12 @@
     <global offwidth="1920" offheight="1080"/>
   </visual>
   <actuator>
-    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="elbow_joint" joint="elbow_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_1_joint" joint="wrist_1_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_2_joint" joint="wrist_2_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_3_joint" joint="wrist_3_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
+    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="100" kv="10" forcelimited="true" forcerange="-150 150"/>
+    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="100" kv="10" forcelimited="true" forcerange="-150 150"/>
+    <position name="elbow_joint" joint="elbow_joint" kp="100" kv="10" forcelimited="true" forcerange="-150 150"/>
+    <position name="wrist_1_joint" joint="wrist_1_joint" kp="100" kv="10" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_2_joint" joint="wrist_2_joint" kp="100" kv="10" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_3_joint" joint="wrist_3_joint" kp="100" kv="10" forcelimited="true" forcerange="-28 28"/>
   </actuator>
   <sensor>
     <jointpos name="sense_shoulder_pan_joint" joint="shoulder_pan_joint"/>
