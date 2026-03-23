@@ -14,6 +14,13 @@ const createDefaultAngles = (): JointAngles => ({
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
 const TARGET_SYNC_GRACE_MS = 300
+const ARM_MIN = -Math.PI
+const ARM_MAX = Math.PI
+const GRIPPER_MIN = 0
+const GRIPPER_MAX = 0.9
+const DEFAULT_GRIPPER_POSITION = 0.8
+const clampArmAngle = (value: number) => clamp(value, ARM_MIN, ARM_MAX)
+const clampGripper = (value: number) => clamp(value, GRIPPER_MIN, GRIPPER_MAX)
 
 const applyStateToTargetAngles = (targetAngles: JointAngles, state: RobotState) => {
   for (const joint of state.joints) {
@@ -34,6 +41,8 @@ export const useRobotStore = defineStore('robot', {
     currentState: null as RobotState | null,
     targetAngles: createDefaultAngles(),
     pendingCommandAngles: null as Partial<JointAngles> | null,
+    targetGripperPosition: DEFAULT_GRIPPER_POSITION,
+    pendingGripperPosition: null as number | null,
     lastLocalInputAt: 0,
     lastUpdatedAt: 0,
   }),
@@ -50,11 +59,23 @@ export const useRobotStore = defineStore('robot', {
       }
       return positions
     },
+    currentGripperPosition: (state): number => {
+      const gripper = state.currentState?.gripper_position
+      if (gripper === null || gripper === undefined) {
+        return DEFAULT_GRIPPER_POSITION
+      }
+      return clampGripper(gripper)
+    },
   },
 
   actions: {
     setTargetAngle(jointName: JointName, angle: number) {
-      this.targetAngles[jointName] = clamp(angle, -Math.PI, Math.PI)
+      this.targetAngles[jointName] = clampArmAngle(angle)
+      this.lastLocalInputAt = Date.now()
+    },
+
+    setTargetGripperPosition(position: number) {
+      this.targetGripperPosition = clampGripper(position)
       this.lastLocalInputAt = Date.now()
     },
 
@@ -66,6 +87,9 @@ export const useRobotStore = defineStore('robot', {
         return
       }
       applyStateToTargetAngles(this.targetAngles, this.currentState)
+      if (this.currentState.gripper_position !== null && this.currentState.gripper_position !== undefined) {
+        this.targetGripperPosition = clampGripper(this.currentState.gripper_position)
+      }
     },
 
     async connect() {
@@ -102,10 +126,11 @@ export const useRobotStore = defineStore('robot', {
       }
     },
 
-    async sendCommand(angles?: Partial<JointAngles>) {
+    async sendCommand(angles?: Partial<JointAngles>, gripperPosition?: number) {
       if (this.isSendingCommand) {
         const queuedAngles = angles ?? { ...this.targetAngles }
         this.pendingCommandAngles = { ...(this.pendingCommandAngles ?? {}), ...queuedAngles }
+        this.pendingGripperPosition = clampGripper(gripperPosition ?? this.targetGripperPosition)
         return
       }
       this.isSendingCommand = true
@@ -116,15 +141,20 @@ export const useRobotStore = defineStore('robot', {
           ...this.targetAngles,
           ...angles,
         }
+        let nextGripperPosition = clampGripper(gripperPosition ?? this.targetGripperPosition)
 
         while (true) {
-          const target = JOINT_ORDER.map((jointName) => clamp(nextAngles[jointName], -Math.PI, Math.PI))
-          await robotApi.control({ target_angles: target })
+          const target = JOINT_ORDER.map((jointName) => clampArmAngle(nextAngles[jointName]))
+          await robotApi.control({
+            target_angles: target,
+            gripper_position: nextGripperPosition,
+          })
           for (const [index, jointName] of JOINT_ORDER.entries()) {
             this.targetAngles[jointName] = target[index]
           }
+          this.targetGripperPosition = nextGripperPosition
 
-          if (!this.pendingCommandAngles) {
+          if (!this.pendingCommandAngles && this.pendingGripperPosition === null) {
             break
           }
 
@@ -134,7 +164,9 @@ export const useRobotStore = defineStore('robot', {
             ...this.targetAngles,
             ...this.pendingCommandAngles,
           }
+          nextGripperPosition = clampGripper(this.pendingGripperPosition ?? this.targetGripperPosition)
           this.pendingCommandAngles = null
+          this.pendingGripperPosition = null
         }
         this.error = ''
       } catch (error) {
@@ -151,6 +183,8 @@ export const useRobotStore = defineStore('robot', {
         await robotApi.reset()
         await this.fetchState()
         this.targetAngles = createDefaultAngles()
+        this.targetGripperPosition = DEFAULT_GRIPPER_POSITION
+        this.pendingGripperPosition = null
         this.lastLocalInputAt = 0
         this.syncTargetAnglesFromState(true)
         this.error = ''

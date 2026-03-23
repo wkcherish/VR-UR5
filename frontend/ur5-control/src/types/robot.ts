@@ -37,6 +37,7 @@ export interface ControlResponse {
   status: string
   message: string
   target_angles: number[]
+  gripper_position?: number | null
   current_ctrl: number[]
 }
 
