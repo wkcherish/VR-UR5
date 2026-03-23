@@ -13,6 +13,52 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
 
+def normalize_mesh_filename(filename):
+    """
+    规范化 URDF 中的 mesh 路径，统一为相对于 frontend/ur5 的相对路径。
+    """
+    normalized = filename.replace("\\", "/").strip()
+    normalized = normalized.replace("package://ur_description/meshes/ur5/", "")
+    normalized = re.sub(r"^\./", "", normalized)
+    normalized = re.sub(r"^ur5/", "", normalized)
+    return normalized
+
+
+def build_temp_mesh_filename(normalized_filename):
+    """
+    生成供 MuJoCo 临时导入使用的扁平化文件名，避免目录被剥离后发生重名。
+    """
+    return normalized_filename.replace("/", "__")
+
+
+def resolve_mesh_source_path(urdf_dir, original_filename, normalized_filename):
+    """
+    根据 URDF 中的原始路径解析 mesh 的实际源文件路径。
+    """
+    candidates = []
+    seen = set()
+
+    for candidate in [
+        original_filename.replace("\\", "/").strip(),
+        normalized_filename,
+        re.sub(r"^\./", "", original_filename.replace("\\", "/").strip()),
+        re.sub(r"^\./ur5/", "", original_filename.replace("\\", "/").strip()),
+    ]:
+        if candidate in seen or not candidate:
+            continue
+        seen.add(candidate)
+        candidates.append(os.path.join(urdf_dir, candidate))
+
+    for candidate_path in candidates:
+        if os.path.exists(candidate_path):
+            return candidate_path
+
+    raise FileNotFoundError(
+        f"找不到 mesh 文件：{original_filename}\n"
+        f"已尝试：{[path for path in candidates]}"
+    )
+
+
 def convert_urdf_to_mjcf(urdf_path, output_path):
     """
     将 URDF 文件转换为 MuJoCo MJCF 格式
@@ -39,21 +85,33 @@ def convert_urdf_to_mjcf(urdf_path, output_path):
     with open(urdf_path, 'r', encoding='utf-8') as f:
         urdf_content = f.read()
 
-    # 提取所有 mesh 文件名（不带路径）
-    visual_meshes = set(re.findall(
-        r'visual/([^"/]+\.(?:dae|stl))', urdf_content))
-    collision_meshes = set(re.findall(
-        r'collision/([^"/]+\.(?:dae|stl))', urdf_content))
+    # 提取并规范化所有 mesh 文件路径
+    original_meshes = sorted(set(re.findall(r'<mesh filename="([^"]+)"', urdf_content)))
+    mesh_path_map = {
+        mesh_filename: normalize_mesh_filename(mesh_filename)
+        for mesh_filename in original_meshes
+    }
+    temp_mesh_path_map = {
+        original_filename: build_temp_mesh_filename(normalized_filename)
+        for original_filename, normalized_filename in mesh_path_map.items()
+    }
+    runtime_mesh_path_map = {
+        temp_filename: normalized_filename
+        for normalized_filename, temp_filename in (
+            (mesh_path_map[original_filename], temp_mesh_path_map[original_filename])
+            for original_filename in original_meshes
+        )
+    }
 
     print(f"\n找到 mesh 文件:")
-    print(f"  Visual mesh: {sorted(visual_meshes)}")
-    print(f"  Collision mesh: {sorted(collision_meshes)}")
+    for original_filename, normalized_filename in mesh_path_map.items():
+        print(f"  {original_filename} -> {normalized_filename} (temp: {temp_mesh_path_map[original_filename]})")
 
-    # 替换路径：将所有 mesh 路径改为纯文件名
-    urdf_content = re.sub(r'visual/', '', urdf_content)
-    urdf_content = re.sub(r'collision/', '', urdf_content)
-    urdf_content = urdf_content.replace(
-        'package://ur_description/meshes/ur5/', '')
+    for original_filename, temp_filename in temp_mesh_path_map.items():
+        urdf_content = urdf_content.replace(
+            f'filename="{original_filename}"',
+            f'filename="{temp_filename}"'
+        )
 
     # 在 robot 标签内添加 mujoco compiler 指令来设置 meshdir
     # 这样 MuJoCo 就知道从 temp_meshes 目录加载文件
@@ -72,21 +130,13 @@ def convert_urdf_to_mjcf(urdf_path, output_path):
     os.makedirs(temp_mesh_dir, exist_ok=True)
 
     # 复制所有需要的 mesh 文件到临时目录
-    all_meshes = visual_meshes.union(collision_meshes)
-    print(f"\n正在复制 {len(all_meshes)} 个 mesh 文件到临时目录...")
+    print(f"\n正在复制 {len(mesh_path_map)} 个 mesh 文件到临时目录...")
 
-    for mesh_file in sorted(all_meshes):
-        # 尝试从 visual 或 collision 目录复制
-        src_visual = os.path.join(urdf_dir, "visual", mesh_file)
-        src_collision = os.path.join(urdf_dir, "collision", mesh_file)
-        dst = os.path.join(temp_mesh_dir, mesh_file)
-
-        if os.path.exists(src_visual):
-            shutil.copy2(src_visual, dst)
-            print(f"  ✓ {mesh_file} (from visual/)")
-        elif os.path.exists(src_collision):
-            shutil.copy2(src_collision, dst)
-            print(f"  ✓ {mesh_file} (from collision/)")
+    for original_filename, normalized_filename in mesh_path_map.items():
+        src = resolve_mesh_source_path(urdf_dir, original_filename, normalized_filename)
+        dst = os.path.join(temp_mesh_dir, temp_mesh_path_map[original_filename])
+        shutil.copy2(src, dst)
+        print(f"  ✓ {normalized_filename} -> {temp_mesh_path_map[original_filename]}")
 
     # 临时修改工作目录以便 MuJoCo 能正确加载 mesh
     original_cwd = os.getcwd()
@@ -128,11 +178,11 @@ def convert_urdf_to_mjcf(urdf_path, output_path):
         os.remove(temp_xml_path)
 
         # 计算 mesh 目录相对路径
-        mesh_dir_rel = os.path.join("..", "frontend", "ur5", "collision")
+        mesh_dir_rel = os.path.join("..", "frontend", "ur5")
 
         # 增强 MJCF（添加执行器、传感器、环境配置）
         print("\n正在增强 MJCF（添加执行器、传感器、环境配置）...")
-        enhanced_mjcf = enhance_mjcf(mjcf_content, mesh_dir_rel)
+        enhanced_mjcf = enhance_mjcf(mjcf_content, mesh_dir_rel, runtime_mesh_path_map)
 
         # 保存最终的 XML
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -153,7 +203,7 @@ def convert_urdf_to_mjcf(urdf_path, output_path):
             print(f"\n✓ 已清理临时 mesh 目录")
 
 
-def enhance_mjcf(xml_content, mesh_dir):
+def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
     """
     增强 MJCF 内容，添加 actuator、sensor 和环境配置
 
@@ -217,6 +267,12 @@ def enhance_mjcf(xml_content, mesh_dir):
     if asset is None:
         asset = ET.SubElement(root, "asset")
 
+    if runtime_mesh_path_map:
+        for mesh in asset.findall("mesh"):
+            file_attr = mesh.get("file")
+            if file_attr in runtime_mesh_path_map:
+                mesh.set("file", runtime_mesh_path_map[file_attr])
+
     # 添加天空盒纹理
     skybox_texture = ET.SubElement(asset, "texture")
     skybox_texture.set("type", "skybox")
@@ -266,6 +322,13 @@ def enhance_mjcf(xml_content, mesh_dir):
     floor_geom.set("material", "MatPlane")
     floor_geom.set("condim", "3")
 
+    # 将手抓 mesh 设为纯显示几何体，避免复杂自碰撞导致仿真不稳定
+    for geom in worldbody.iter("geom"):
+        mesh_name = geom.get("mesh", "")
+        if mesh_name.startswith("robotiq_2f85_v4__"):
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
+
     # ==================== 7. 添加 Actuator 配置 ====================
     actuator = root.find("actuator")
     if actuator is None:
@@ -283,10 +346,15 @@ def enhance_mjcf(xml_content, mesh_dir):
 
     # 查找所有 joint 元素
     joints_found = []
+    all_joint_names = []
 
     def find_joints(element):
-        if element.tag == "joint" and element.get("name") in ur5_joints:
-            joints_found.append(element.get("name"))
+        if element.tag == "joint":
+            joint_name = element.get("name")
+            if joint_name:
+                all_joint_names.append(joint_name)
+                if joint_name in ur5_joints:
+                    joints_found.append(joint_name)
         for child in element:
             find_joints(child)
 
@@ -329,7 +397,38 @@ def enhance_mjcf(xml_content, mesh_dir):
             existing_motor.set("forcerange", actuator_force_ranges[joint_name])
             added_actuators.append(joint_name)
 
-    # ==================== 8. 添加 Sensor 配置 ====================
+    # ==================== 8. 添加 Robotiq 2F-85 约束和执行器 ====================
+    gripper_joint_names = [
+        "left_driver_joint",
+        "right_driver_joint",
+        "left_spring_link_joint",
+        "right_spring_link_joint",
+        "left_follower_joint",
+        "right_follower_joint",
+    ]
+    gripper_present = all(
+        joint_name in all_joint_names for joint_name in gripper_joint_names
+    )
+
+    if gripper_present:
+        existing_actuator_joints = {
+            motor.get("joint")
+            for motor in actuator.findall("position")
+        }
+        for joint_name in gripper_joint_names:
+            if joint_name in existing_actuator_joints:
+                continue
+            gripper_actuator = ET.SubElement(actuator, "position")
+            gripper_actuator.set("name", joint_name)
+            gripper_actuator.set("joint", joint_name)
+            gripper_actuator.set("kp", "25")
+            gripper_actuator.set("kv", "5")
+            gripper_actuator.set("ctrlrange", "0 0.9")
+            gripper_actuator.set("ctrllimited", "true")
+            gripper_actuator.set("forcelimited", "true")
+            gripper_actuator.set("forcerange", "-20 20")
+
+    # ==================== 9. 添加 Sensor 配置 ====================
     sensor = root.find("sensor")
     if sensor is None:
         sensor = ET.SubElement(root, "sensor")
@@ -339,6 +438,18 @@ def enhance_mjcf(xml_content, mesh_dir):
         joint_pos_sensor = ET.SubElement(sensor, "jointpos")
         joint_pos_sensor.set("name", f"sense_{joint_name}")
         joint_pos_sensor.set("joint", joint_name)
+
+    if gripper_present:
+        existing_sensor_joints = {
+            joint_sensor.get("joint")
+            for joint_sensor in sensor.findall("jointpos")
+        }
+        for joint_name in gripper_joint_names:
+            if joint_name in existing_sensor_joints:
+                continue
+            joint_pos_sensor = ET.SubElement(sensor, "jointpos")
+            joint_pos_sensor.set("name", f"sense_{joint_name}")
+            joint_pos_sensor.set("joint", joint_name)
 
     # ==================== 格式化并返回 XML ====================
     xml_str = ET.tostring(root, encoding="unicode")

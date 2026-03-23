@@ -19,10 +19,12 @@ export interface RobotState {
   joints: JointState[]
   qpos: number[]
   qvel: number[]
+  gripper_position?: number | null
 }
 
 export interface ControlInput {
   target_angles: number[]
+  gripper_position?: number
 }
 
 export interface ApiResponse<T = unknown> {

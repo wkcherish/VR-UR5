@@ -263,25 +263,58 @@ describe('URDF visual origin flow', () => {
         const parent = linkNodes.get(joint.parent)!
         const child = linkNodes.get(joint.child)!
         const observed = new THREE.Matrix4().copy(parent.matrixWorld).invert().multiply(child.matrixWorld)
-        const angle = joint.type === 'revolute' ? pose[joint.name as keyof typeof pose] : 0
+        const angle = joint.type === 'revolute' ? (pose[joint.name as keyof typeof pose] ?? 0) : 0
         const expected = buildExpectedJointTransform(joint.origin, joint.axis, angle)
         expect(matrixElementsAlmostEqual(observed, expected, 1e-5)).toBe(true)
       }
     }
   })
 
-  it('parses UR5 visual material colors from URDF consistently', () => {
+  it('parses UR5 body and gripper visual material colors from URDF consistently', () => {
     const robot = parseUrdf(ur5Raw)
-    const visualMaterials = robot.links.flatMap((link) => link.visuals.map((visual) => visual.material?.color))
-    expect(visualMaterials.length).toBeGreaterThan(0)
-    const missingMaterialCount = visualMaterials.filter((color) => !color).length
-    expect(missingMaterialCount).toBe(0)
-    for (const color of visualMaterials) {
+    const ur5BodyLinks = new Set([
+      'base_link_inertia',
+      'shoulder_link',
+      'upper_arm_link',
+      'forearm_link',
+      'wrist_1_link',
+      'wrist_2_link',
+      'wrist_3_link',
+    ])
+
+    const ur5BodyMaterials = robot.links
+      .filter((link) => ur5BodyLinks.has(link.name))
+      .flatMap((link) => link.visuals.map((visual) => visual.material?.color))
+    expect(ur5BodyMaterials.length).toBeGreaterThan(0)
+    expect(ur5BodyMaterials.filter((color) => !color)).toHaveLength(0)
+    for (const color of ur5BodyMaterials) {
       expect(color?.[0]).toBeCloseTo(0.7)
       expect(color?.[1]).toBeCloseTo(0.7)
       expect(color?.[2]).toBeCloseTo(0.7)
       expect(color?.[3]).toBeCloseTo(1)
     }
+
+    const gripperLinks = robot.links.filter((link) =>
+      [
+        'robotiq_base_link',
+        'left_driver_link',
+        'left_coupler_link',
+        'left_spring_link',
+        'left_follower_link',
+        'left_pad_link',
+        'right_driver_link',
+        'right_coupler_link',
+        'right_spring_link',
+        'right_follower_link',
+        'right_pad_link',
+      ].includes(link.name),
+    )
+    expect(gripperLinks.length).toBeGreaterThan(0)
+    const gripperMaterials = gripperLinks.flatMap((link) => link.visuals.map((visual) => visual.material?.color))
+    expect(gripperMaterials.filter((color) => !color)).toHaveLength(0)
+    expect(gripperMaterials.some((color) => color?.[0] === 0.149 && color?.[1] === 0.149 && color?.[2] === 0.149)).toBe(true)
+    expect(gripperMaterials.some((color) => color?.[0] === 0.58 && color?.[1] === 0.58 && color?.[2] === 0.58)).toBe(true)
+    expect(gripperMaterials.some((color) => color?.[0] === 0.88 && color?.[1] === 0.88 && color?.[2] === 0.88)).toBe(true)
   })
 
   it('matches UR5 parent-child transforms under threshold for multiple poses', () => {
@@ -323,7 +356,7 @@ describe('URDF visual origin flow', () => {
         const parent = linkNodes.get(joint.parent)!
         const child = linkNodes.get(joint.child)!
         const observed = new THREE.Matrix4().copy(parent.matrixWorld).invert().multiply(child.matrixWorld)
-        const angle = joint.type === 'revolute' ? pose[joint.name as keyof typeof pose] : 0
+        const angle = joint.type === 'revolute' ? (pose[joint.name as keyof typeof pose] ?? 0) : 0
         const expected = buildExpectedJointTransform(joint.origin, joint.axis, angle)
         const observedPos = new THREE.Vector3()
         const expectedPos = new THREE.Vector3()

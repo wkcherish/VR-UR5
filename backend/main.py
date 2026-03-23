@@ -28,8 +28,9 @@ simulation_task = None  # 后台仿真任务
 
 # ==================== Pydantic 模型 ====================
 class ControlInput(BaseModel):
-    """控制输入模型 - 6 个关节的目标角度"""
+    """控制输入模型 - 6 个机械臂关节 + 可选 gripper 开合量"""
     target_angles: List[float]
+    gripper_position: float | None = None
 
 
 class JointState(BaseModel):
@@ -44,6 +45,7 @@ class RobotState(BaseModel):
     joints: List[JointState]
     qpos: List[float]
     qvel: List[float]
+    gripper_position: float | None = None
 
 
 # ==================== Lifespan 管理 ====================
@@ -64,8 +66,8 @@ async def lifespan(app: FastAPI):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, "ur5_converted.xml")
 
-    # 计算 mesh 目录的绝对路径（collision 子目录，使用.stl 文件）
-    mesh_dir = os.path.join(script_dir, "..", "frontend", "ur5", "collision")
+    # 计算 mesh 根目录的绝对路径（包含 visual/collision/robotiq_2f85_v4 等子目录）
+    mesh_dir = os.path.join(script_dir, "..", "frontend", "ur5")
     mesh_dir_abs = os.path.abspath(mesh_dir)
 
     # 检查模型文件是否存在
@@ -272,7 +274,7 @@ async def root():
         "message": "UR5 MuJoCo Simulation Server",
         "endpoints": [
             "GET /state - 获取机器人状态",
-            "POST /control - 发送控制指令"
+            "POST /control - 发送控制指令（支持 gripper_position）"
         ]
     }
 
@@ -281,7 +283,7 @@ async def root():
 async def get_robot_state():
     """
     获取当前机器人状态
-    返回 6 个关节的角度和速度
+    返回 6 个机械臂关节的角度和速度，以及手抓开合角
     """
     if model is None or data is None:
         raise HTTPException(status_code=503, detail="仿真未初始化")
@@ -326,10 +328,22 @@ async def get_robot_state():
                     qpos_list.append(position)
                     qvel_list.append(velocity)
 
+        gripper_position = None
+        gripper_joint_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            "left_driver_joint"
+        )
+        if gripper_joint_id >= 0:
+            gripper_qpos_idx = model.jnt_qposadr[gripper_joint_id]
+            if gripper_qpos_idx >= 0:
+                gripper_position = float(data.qpos[gripper_qpos_idx])
+
         return RobotState(
             joints=states,
             qpos=qpos_list,
-            qvel=qvel_list
+            qvel=qvel_list,
+            gripper_position=gripper_position
         )
 
     except Exception as e:
@@ -340,16 +354,16 @@ async def get_robot_state():
 async def set_robot_control(control_input: ControlInput):
     """
     设置机器人控制指令
-    接收 6 个目标角度并更新 data.ctrl
+    接收 6 个机械臂目标角度，并可选控制 gripper 开合
     """
     if model is None or data is None:
         raise HTTPException(status_code=503, detail="仿真未初始化")
 
     # 验证输入
-    if len(control_input.target_angles) != 6:
+    if len(control_input.target_angles) not in (6, 7):
         raise HTTPException(
             status_code=400,
-            detail=f"需要 6 个目标角度，收到 {len(control_input.target_angles)} 个"
+            detail=f"需要 6 个机械臂目标角度，或 6 个角度加 1 个 gripper 值，收到 {len(control_input.target_angles)} 个"
         )
 
     try:
@@ -363,8 +377,12 @@ async def set_robot_control(control_input: ControlInput):
                 "wrist_2_joint",
                 "wrist_3_joint"
             ]
+            arm_targets = control_input.target_angles[:6]
+            gripper_target = control_input.gripper_position
+            if gripper_target is None and len(control_input.target_angles) == 7:
+                gripper_target = control_input.target_angles[6]
 
-            # 更新每个执行器的控制信号
+            # 更新机械臂执行器的控制信号
             for i, actuator_name in enumerate(ur5_joints):
                 actuator_id = mujoco.mj_name2id(
                     model,
@@ -374,19 +392,31 @@ async def set_robot_control(control_input: ControlInput):
 
                 if actuator_id >= 0:
                     # 设置目标位置到 ctrl 数组
-                    data.ctrl[actuator_id] = control_input.target_angles[i]
+                    data.ctrl[actuator_id] = arm_targets[i]
+
+            if gripper_target is not None:
+                gripper_actuator_id = mujoco.mj_name2id(
+                    model,
+                    mujoco.mjtObj.mjOBJ_ACTUATOR,
+                    "fingers_actuator"
+                )
+                if gripper_actuator_id >= 0:
+                    data.ctrl[gripper_actuator_id] = float(
+                        np.clip(gripper_target, 0.0, 255.0)
+                    )
 
             # 前向动力学计算并同步 viewer
             mujoco.mj_forward(model, data)
             if viewer_handle is not None and viewer_handle.is_running():
                 viewer_handle.sync()
 
-            current_ctrl = data.ctrl[:6].tolist() if len(data.ctrl) >= 6 else data.ctrl.tolist()
+            current_ctrl = data.ctrl.tolist()
 
         return {
             "status": "success",
-            "message": f"已更新 6 个关节目标角度",
-            "target_angles": control_input.target_angles,
+            "message": "已更新机械臂目标角度" + ("与 gripper 开合" if gripper_target is not None else ""),
+            "target_angles": arm_targets,
+            "gripper_position": gripper_target,
             "current_ctrl": current_ctrl
         }
 
