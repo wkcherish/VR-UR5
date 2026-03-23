@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import os
+import threading
 
 
 # ==================== 全局变量 ====================
@@ -20,6 +21,9 @@ data: mujoco.MjData = None
 simulation_running = False
 viewer_enabled = False  # 是否启用可视化窗口
 viewer_thread = None    # 可视化线程
+viewer_handle = None    # launch_passive 返回的 viewer 句柄
+simulation_lock = threading.Lock()
+simulation_task = None  # 后台仿真任务
 
 
 # ==================== Pydantic 模型 ====================
@@ -50,7 +54,7 @@ async def lifespan(app: FastAPI):
     在应用启动时加载模型，关闭时清理资源
     动态设置 mesh 路径以确保正确加载
     """
-    global model, data
+    global model, data, viewer_handle, simulation_task, simulation_running
 
     print("=" * 60)
     print("正在初始化 MuJoCo 仿真环境...")
@@ -126,11 +130,12 @@ async def lifespan(app: FastAPI):
         try:
             # 从修改后的 XML 加载模型
             print(f"从临时文件加载：{temp_model_path}")
-            model = mujoco.MjModel.from_xml_path(temp_model_path)
-            data = mujoco.MjData(model)
+            with simulation_lock:
+                model = mujoco.MjModel.from_xml_path(temp_model_path)
+                data = mujoco.MjData(model)
 
-            # 验证模型
-            mujoco.mj_forward(model, data)
+                # 验证模型
+                mujoco.mj_forward(model, data)
 
             print(f"\n✓ 模型加载成功")
             print(f"  - 自由度 (nv): {model.nv}")
@@ -141,15 +146,14 @@ async def lifespan(app: FastAPI):
             print(f"  - Mesh 路径：{mesh_dir_abs}")
             print("=" * 60)
 
-            # 如果启用了可视化，启动 viewer（在后台线程）
+            # 如果启用了可视化，启动 passive viewer 进行状态同步显示
             if viewer_enabled:
                 print("\n🎬 正在启动 MuJoCo 可视化窗口...")
-                viewer_thread = threading.Thread(
-                    target=run_viewer, daemon=True)
-                viewer_thread.start()
-                import time
-                time.sleep(0.5)  # 给 viewer 一点时间初始化
+                viewer_handle = run_viewer()
+                if viewer_handle is not None:
+                    viewer_handle.sync()
 
+            simulation_task = asyncio.create_task(simulation_loop())
             yield
 
         finally:
@@ -170,6 +174,13 @@ async def lifespan(app: FastAPI):
     finally:
         # 清理资源
         print("\n正在关闭仿真服务器...")
+        simulation_running = False
+        if simulation_task is not None:
+            await simulation_task
+            simulation_task = None
+        if viewer_handle is not None:
+            viewer_handle.close()
+            viewer_handle = None
         model = None
         data = None
         print("✓ 资源已释放")
@@ -208,18 +219,24 @@ async def simulation_loop():
     global simulation_running
 
     simulation_running = True
-    dt = 0.01  # 100Hz 仿真频率
+    wall_dt = 0.01  # 100Hz 主循环
 
-    print("🚀 仿真循环已启动 (100Hz)")
+    print("🚀 仿真循环已启动")
 
     while simulation_running:
         try:
+            cycle_start = asyncio.get_running_loop().time()
             if model is not None and data is not None:
-                # 执行物理步进
-                mujoco.mj_step(model, data)
+                with simulation_lock:
+                    # 按 MuJoCo timestep 批量推进，避免仿真时间明显慢于真实时间。
+                    step_count = max(1, round(wall_dt / model.opt.timestep))
+                    for _ in range(step_count):
+                        mujoco.mj_step(model, data)
+                    if viewer_handle is not None and viewer_handle.is_running():
+                        viewer_handle.sync()
 
-            # 控制频率在 100Hz
-            await asyncio.sleep(dt)
+            elapsed = asyncio.get_running_loop().time() - cycle_start
+            await asyncio.sleep(max(0.0, wall_dt - elapsed))
 
         except Exception as e:
             print(f"仿真错误：{str(e)}")
@@ -231,8 +248,8 @@ async def simulation_loop():
 # ==================== 可视化函数 ====================
 def run_viewer():
     """
-    运行 MuJoCo 可视化窗口（在独立线程中）
-    注意：必须在主线程中运行
+    启动 MuJoCo passive viewer
+    由服务端仿真循环统一执行 mj_step，viewer 只负责显示同步
     """
     if model is None or data is None:
         print("✗ 模型未加载，无法启动可视化")
@@ -240,25 +257,11 @@ def run_viewer():
 
     print("🎬 正在启动 MuJoCo 可视化窗口...")
     try:
-        # 使用 mujoco 的内置 viewer
         import mujoco.viewer
-        mujoco.viewer.launch(model, data)
+        return mujoco.viewer.launch_passive(model, data)
     except Exception as e:
         print(f"✗ 可视化启动失败：{str(e)}")
-
-
-@app.on_event("startup")
-async def start_simulation():
-    """启动时自动运行仿真循环"""
-    asyncio.create_task(simulation_loop())
-
-
-@app.on_event("shutdown")
-async def stop_simulation():
-    """关闭时停止仿真"""
-    global simulation_running
-    simulation_running = False
-
+        return None
 
 # ==================== API 接口 ====================
 @app.get("/")
@@ -284,50 +287,44 @@ async def get_robot_state():
         raise HTTPException(status_code=503, detail="仿真未初始化")
 
     try:
-        # 获取关节名称映射
-        joint_names = []
-        for i in range(model.njnt):
-            joint_name = mujoco.mj_id2name(
-                model, mujoco.mjtObj.mjOBJ_JOINT, i)
-            joint_names.append(joint_name)
+        with simulation_lock:
+            # 提取 UR5 的 6 个主要关节
+            ur5_joints = [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint"
+            ]
 
-        # 提取 UR5 的 6 个主要关节
-        ur5_joints = [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint"
-        ]
+            states = []
+            qpos_list = []
+            qvel_list = []
 
-        states = []
-        qpos_list = []
-        qvel_list = []
+            # 遍历所有关节，提取状态
+            for i in range(model.njnt):
+                joint_name = mujoco.mj_id2name(
+                    model, mujoco.mjtObj.mjOBJ_JOINT, i)
 
-        # 遍历所有关节，提取状态
-        for i in range(model.njnt):
-            joint_name = mujoco.mj_id2name(
-                model, mujoco.mjtObj.mjOBJ_JOINT, i)
+                # 只返回 UR5 的主要关节
+                if joint_name in ur5_joints:
+                    # 获取关节位置索引
+                    qpos_idx = model.jnt_qposadr[i]
+                    qvel_idx = model.jnt_dofadr[i]
 
-            # 只返回 UR5 的主要关节
-            if joint_name in ur5_joints:
-                # 获取关节位置索引
-                qpos_idx = model.jnt_qposadr[i]
-                qvel_idx = model.jnt_dofadr[i]
+                    # 读取位置和速度
+                    position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
+                    velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
 
-                # 读取位置和速度
-                position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
-                velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
+                    states.append(JointState(
+                        joint_name=joint_name,
+                        position=position,
+                        velocity=velocity
+                    ))
 
-                states.append(JointState(
-                    joint_name=joint_name,
-                    position=position,
-                    velocity=velocity
-                ))
-
-                qpos_list.append(position)
-                qvel_list.append(velocity)
+                    qpos_list.append(position)
+                    qvel_list.append(velocity)
 
         return RobotState(
             joints=states,
@@ -356,36 +353,41 @@ async def set_robot_control(control_input: ControlInput):
         )
 
     try:
-        # 获取执行器 ID 映射
-        ur5_joints = [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint"
-        ]
+        with simulation_lock:
+            # 获取执行器 ID 映射
+            ur5_joints = [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint"
+            ]
 
-        # 更新每个执行器的控制信号
-        for i, actuator_name in enumerate(ur5_joints):
-            actuator_id = mujoco.mj_name2id(
-                model,
-                mujoco.mjtObj.mjOBJ_ACTUATOR,
-                actuator_name
-            )
+            # 更新每个执行器的控制信号
+            for i, actuator_name in enumerate(ur5_joints):
+                actuator_id = mujoco.mj_name2id(
+                    model,
+                    mujoco.mjtObj.mjOBJ_ACTUATOR,
+                    actuator_name
+                )
 
-            if actuator_id >= 0:
-                # 设置目标位置到 ctrl 数组
-                data.ctrl[actuator_id] = control_input.target_angles[i]
+                if actuator_id >= 0:
+                    # 设置目标位置到 ctrl 数组
+                    data.ctrl[actuator_id] = control_input.target_angles[i]
 
-        # 前向动力学计算
-        mujoco.mj_forward(model, data)
+            # 前向动力学计算并同步 viewer
+            mujoco.mj_forward(model, data)
+            if viewer_handle is not None and viewer_handle.is_running():
+                viewer_handle.sync()
+
+            current_ctrl = data.ctrl[:6].tolist() if len(data.ctrl) >= 6 else data.ctrl.tolist()
 
         return {
             "status": "success",
             "message": f"已更新 6 个关节目标角度",
             "target_angles": control_input.target_angles,
-            "current_ctrl": data.ctrl[:6].tolist() if len(data.ctrl) >= 6 else data.ctrl.tolist()
+            "current_ctrl": current_ctrl
         }
 
     except Exception as e:
@@ -399,21 +401,22 @@ async def get_single_joint_state(joint_name: str):
         raise HTTPException(status_code=503, detail="仿真未初始化")
 
     try:
-        joint_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_JOINT,
-            joint_name
-        )
+        with simulation_lock:
+            joint_id = mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                joint_name
+            )
 
-        if joint_id < 0:
-            raise HTTPException(
-                status_code=404, detail=f"关节 '{joint_name}' 不存在")
+            if joint_id < 0:
+                raise HTTPException(
+                    status_code=404, detail=f"关节 '{joint_name}' 不存在")
 
-        qpos_idx = model.jnt_qposadr[joint_id]
-        qvel_idx = model.jnt_dofadr[joint_id]
+            qpos_idx = model.jnt_qposadr[joint_id]
+            qvel_idx = model.jnt_dofadr[joint_id]
 
-        position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
-        velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
+            position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
+            velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
 
         return JointState(
             joint_name=joint_name,
@@ -454,9 +457,12 @@ async def reset_simulation():
         raise HTTPException(status_code=503, detail="仿真未初始化")
 
     try:
-        # 重置到初始状态
-        mujoco.mj_resetData(model, data)
-        mujoco.mj_forward(model, data)
+        with simulation_lock:
+            # 重置到初始状态
+            mujoco.mj_resetData(model, data)
+            mujoco.mj_forward(model, data)
+            if viewer_handle is not None and viewer_handle.is_running():
+                viewer_handle.sync()
 
         return {
             "status": "success",

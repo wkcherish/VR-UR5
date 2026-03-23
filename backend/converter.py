@@ -292,24 +292,41 @@ def enhance_mjcf(xml_content, mesh_dir):
 
     find_joints(worldbody)
 
+    actuator_force_ranges = {
+        "shoulder_pan_joint": "-150 150",
+        "shoulder_lift_joint": "-150 150",
+        "elbow_joint": "-150 150",
+        "wrist_1_joint": "-28 28",
+        "wrist_2_joint": "-28 28",
+        "wrist_3_joint": "-28 28",
+    }
+
     # 为找到的关节添加执行器
     added_actuators = []
     for joint_name in joints_found:
         # 检查是否已存在该执行器
-        existing = False
+        existing_motor = None
         for motor in actuator.findall("position"):
             if motor.get("joint") == joint_name:
-                existing = True
+                existing_motor = motor
                 break
 
-        if not existing:
+        if existing_motor is None:
             motor = ET.SubElement(actuator, "position")
             motor.set("name", joint_name)
             motor.set("joint", joint_name)
             motor.set("kp", "100")
             motor.set("kv", "10")
             motor.set("forcelimited", "true")
-            motor.set("forcerange", "0 150")
+            motor.set("forcerange", actuator_force_ranges[joint_name])
+            added_actuators.append(joint_name)
+        else:
+            existing_motor.set("name", joint_name)
+            existing_motor.set("joint", joint_name)
+            existing_motor.set("kp", "100")
+            existing_motor.set("kv", "10")
+            existing_motor.set("forcelimited", "true")
+            existing_motor.set("forcerange", actuator_force_ranges[joint_name])
             added_actuators.append(joint_name)
 
     # ==================== 8. 添加 Sensor 配置 ====================

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import RobotViewer from './components/RobotViewer.vue'
 import { useRobot } from '@/composables/useRobot'
 import { JOINT_ORDER } from '@/types/robot'
@@ -13,12 +13,14 @@ const {
   setTargetAngle,
   isConnected,
   isLoading,
-  isSendingCommand,
   error,
   currentState,
   targetAngles,
   lastUpdatedAt,
-} = useRobot({ pollingInterval: 100 })
+} = useRobot({ pollingInterval: 50 })
+
+const COMMAND_DEBOUNCE_MS = 80
+let queuedCommandTimer: number | null = null
 
 const jointList = computed(() =>
   JOINT_ORDER.map((jointName) => ({
@@ -36,15 +38,35 @@ const lastUpdatedLabel = computed(() => {
   return new Date(lastUpdatedAt.value).toLocaleTimeString()
 })
 
-const handleAngleInput = (jointName: JointName, value: number) => {
-  setTargetAngle(jointName, value)
+const clearQueuedCommand = () => {
+  if (queuedCommandTimer !== null) {
+    window.clearTimeout(queuedCommandTimer)
+    queuedCommandTimer = null
+  }
 }
 
 const handleSendCommand = async () => {
   if (!isConnected.value) {
     return
   }
+  clearQueuedCommand()
   await sendCommand()
+}
+
+const queueCommand = () => {
+  if (!isConnected.value) {
+    return
+  }
+  clearQueuedCommand()
+  queuedCommandTimer = window.setTimeout(() => {
+    queuedCommandTimer = null
+    void handleSendCommand()
+  }, COMMAND_DEBOUNCE_MS)
+}
+
+const handleAngleInput = (jointName: JointName, value: number) => {
+  setTargetAngle(jointName, value)
+  queueCommand()
 }
 
 watch(
@@ -62,25 +84,14 @@ watch(
   { immediate: true, deep: true },
 )
 
-watch(
-  () => [viewerRef.value, targetAngles.value],
-  () => {
-    if (!viewerRef.value) {
-      return
-    }
-    const angles: Record<string, number> = {}
-    for (const jointName of JOINT_ORDER) {
-      angles[jointName] = targetAngles.value[jointName]
-    }
-    viewerRef.value.updateJoints(angles)
-  },
-  { deep: true },
-)
-
 onMounted(async () => {
   if (!isConnected.value) {
     await connect()
   }
+})
+
+onUnmounted(() => {
+  clearQueuedCommand()
 })
 </script>
 
@@ -105,6 +116,7 @@ onMounted(async () => {
             step="0.01"
             :disabled="!isConnected || isLoading"
             @input="handleAngleInput(joint.name, Number(($event.target as HTMLInputElement).value))"
+            @change="handleSendCommand"
           />
           <span class="joint-value">
             目标 {{ joint.target.toFixed(2) }} rad / 当前 {{ joint.current.toFixed(2) }} rad
@@ -113,9 +125,6 @@ onMounted(async () => {
       </div>
       <div class="panel-actions">
         <button type="button" :disabled="isConnected || isLoading" @click="connect">连接后端</button>
-        <button type="button" :disabled="!isConnected || isSendingCommand" @click="handleSendCommand">
-          {{ isSendingCommand ? '发送中...' : '发送指令' }}
-        </button>
         <button type="button" :disabled="!isConnected || isLoading" @click="reset">重置仿真</button>
         <button type="button" @click="viewerRef?.resetCamera()">重置视角</button>
       </div>

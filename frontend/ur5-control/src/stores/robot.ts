@@ -13,6 +13,16 @@ const createDefaultAngles = (): JointAngles => ({
 })
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
+const TARGET_SYNC_GRACE_MS = 300
+
+const applyStateToTargetAngles = (targetAngles: JointAngles, state: RobotState) => {
+  for (const joint of state.joints) {
+    if (joint.joint_name in targetAngles) {
+      const jointName = joint.joint_name as JointName
+      targetAngles[jointName] = joint.position
+    }
+  }
+}
 
 export const useRobotStore = defineStore('robot', {
   state: () => ({
@@ -23,6 +33,8 @@ export const useRobotStore = defineStore('robot', {
     error: '',
     currentState: null as RobotState | null,
     targetAngles: createDefaultAngles(),
+    pendingCommandAngles: null as Partial<JointAngles> | null,
+    lastLocalInputAt: 0,
     lastUpdatedAt: 0,
   }),
 
@@ -43,6 +55,17 @@ export const useRobotStore = defineStore('robot', {
   actions: {
     setTargetAngle(jointName: JointName, angle: number) {
       this.targetAngles[jointName] = clamp(angle, -Math.PI, Math.PI)
+      this.lastLocalInputAt = Date.now()
+    },
+
+    syncTargetAnglesFromState(force = false) {
+      if (!this.currentState) {
+        return
+      }
+      if (!force && Date.now() - this.lastLocalInputAt < TARGET_SYNC_GRACE_MS) {
+        return
+      }
+      applyStateToTargetAngles(this.targetAngles, this.currentState)
     },
 
     async connect() {
@@ -50,6 +73,7 @@ export const useRobotStore = defineStore('robot', {
       this.error = ''
       try {
         await this.fetchState()
+        this.syncTargetAnglesFromState(true)
         this.isConnected = true
       } catch (error) {
         this.isConnected = false
@@ -68,12 +92,7 @@ export const useRobotStore = defineStore('robot', {
         const state = await robotApi.getState()
         this.currentState = state
         this.lastUpdatedAt = Date.now()
-        for (const joint of state.joints) {
-          if (joint.joint_name in this.targetAngles) {
-            const jointName = joint.joint_name as JointName
-            this.targetAngles[jointName] = joint.position
-          }
-        }
+        this.syncTargetAnglesFromState()
         this.error = ''
       } catch (error) {
         this.error = error instanceof Error ? error.message : '状态获取失败'
@@ -85,17 +104,38 @@ export const useRobotStore = defineStore('robot', {
 
     async sendCommand(angles?: Partial<JointAngles>) {
       if (this.isSendingCommand) {
+        const queuedAngles = angles ?? { ...this.targetAngles }
+        this.pendingCommandAngles = { ...(this.pendingCommandAngles ?? {}), ...queuedAngles }
         return
       }
       this.isSendingCommand = true
       try {
-        const nextAngles: JointAngles = { ...this.targetAngles, ...angles }
-        const target = JOINT_ORDER.map((jointName) => clamp(nextAngles[jointName], -Math.PI, Math.PI))
-        await robotApi.control({ target_angles: target })
-        for (const [index, jointName] of JOINT_ORDER.entries()) {
-          this.targetAngles[jointName] = target[index]
+        this.lastLocalInputAt = Date.now()
+        let nextAngles: JointAngles = {
+          ...this.currentPositions,
+          ...this.targetAngles,
+          ...angles,
         }
-        await this.fetchState()
+
+        while (true) {
+          const target = JOINT_ORDER.map((jointName) => clamp(nextAngles[jointName], -Math.PI, Math.PI))
+          await robotApi.control({ target_angles: target })
+          for (const [index, jointName] of JOINT_ORDER.entries()) {
+            this.targetAngles[jointName] = target[index]
+          }
+
+          if (!this.pendingCommandAngles) {
+            break
+          }
+
+          this.lastLocalInputAt = Date.now()
+          nextAngles = {
+            ...this.currentPositions,
+            ...this.targetAngles,
+            ...this.pendingCommandAngles,
+          }
+          this.pendingCommandAngles = null
+        }
         this.error = ''
       } catch (error) {
         this.error = error instanceof Error ? error.message : '控制指令发送失败'
@@ -109,8 +149,10 @@ export const useRobotStore = defineStore('robot', {
       this.isLoading = true
       try {
         await robotApi.reset()
-        this.targetAngles = createDefaultAngles()
         await this.fetchState()
+        this.targetAngles = createDefaultAngles()
+        this.lastLocalInputAt = 0
+        this.syncTargetAnglesFromState(true)
         this.error = ''
       } catch (error) {
         this.error = error instanceof Error ? error.message : '重置失败'
