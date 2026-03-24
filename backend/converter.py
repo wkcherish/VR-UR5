@@ -347,6 +347,7 @@ def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
     # 查找所有 joint 元素
     joints_found = []
     all_joint_names = []
+    joint_ctrl_ranges = {}
 
     def find_joints(element):
         if element.tag == "joint":
@@ -355,6 +356,9 @@ def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
                 all_joint_names.append(joint_name)
                 if joint_name in ur5_joints:
                     joints_found.append(joint_name)
+                    joint_range = element.get("range")
+                    if joint_range:
+                        joint_ctrl_ranges[joint_name] = joint_range
         for child in element:
             find_joints(child)
 
@@ -368,10 +372,19 @@ def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
         "wrist_2_joint": "-28 28",
         "wrist_3_joint": "-28 28",
     }
+    default_joint_ctrl_ranges = {
+        "shoulder_pan_joint": "-6.28319 6.28319",
+        "shoulder_lift_joint": "-6.28319 6.28319",
+        "elbow_joint": "-3.14159 3.14159",
+        "wrist_1_joint": "-6.28319 6.28319",
+        "wrist_2_joint": "-6.28319 6.28319",
+        "wrist_3_joint": "-6.28319 6.28319",
+    }
 
     # 为找到的关节添加执行器
     added_actuators = []
     for joint_name in joints_found:
+        ctrl_range = joint_ctrl_ranges.get(joint_name, default_joint_ctrl_ranges[joint_name])
         # 检查是否已存在该执行器
         existing_motor = None
         for motor in actuator.findall("position"):
@@ -385,6 +398,8 @@ def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
             motor.set("joint", joint_name)
             motor.set("kp", "100")
             motor.set("kv", "10")
+            motor.set("ctrllimited", "true")
+            motor.set("ctrlrange", ctrl_range)
             motor.set("forcelimited", "true")
             motor.set("forcerange", actuator_force_ranges[joint_name])
             added_actuators.append(joint_name)
@@ -393,6 +408,8 @@ def enhance_mjcf(xml_content, mesh_dir, runtime_mesh_path_map=None):
             existing_motor.set("joint", joint_name)
             existing_motor.set("kp", "100")
             existing_motor.set("kv", "10")
+            existing_motor.set("ctrllimited", "true")
+            existing_motor.set("ctrlrange", ctrl_range)
             existing_motor.set("forcelimited", "true")
             existing_motor.set("forcerange", actuator_force_ranges[joint_name])
             added_actuators.append(joint_name)

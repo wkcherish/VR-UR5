@@ -7,7 +7,7 @@ import asyncio
 import mujoco
 import numpy as np
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -24,10 +24,60 @@ viewer_thread = None    # 可视化线程
 viewer_handle = None    # launch_passive 返回的 viewer 句柄
 simulation_lock = threading.Lock()
 simulation_task = None  # 后台仿真任务
+ws_clients: set[WebSocket] = set()
+ws_clients_lock: asyncio.Lock | None = None
+STATE_PUSH_INTERVAL = 0.02  # 50Hz 状态推送
+SIMULATION_ERROR_BACKOFF = 0.05
 GRIPPER_ANGLE_MIN = 0.0
 GRIPPER_ANGLE_MAX = 0.9
 GRIPPER_CTRL_MIN = 0.0
 GRIPPER_CTRL_MAX = 255.0
+UR5_ARM_JOINTS = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
+UR5_ACTUATOR_FORCE_RANGES = {
+    "shoulder_pan_joint": (-150.0, 150.0),
+    "shoulder_lift_joint": (-150.0, 150.0),
+    "elbow_joint": (-150.0, 150.0),
+    "wrist_1_joint": (-28.0, 28.0),
+    "wrist_2_joint": (-28.0, 28.0),
+    "wrist_3_joint": (-28.0, 28.0),
+}
+
+
+def is_viewer_running() -> bool:
+    """安全判断 viewer 是否仍在运行。"""
+    if viewer_handle is None:
+        return False
+
+    checker = getattr(viewer_handle, "is_running", None)
+    try:
+        if callable(checker):
+            return bool(checker())
+        if checker is not None:
+            return bool(checker)
+    except Exception:
+        return False
+    return False
+
+
+def safe_viewer_sync_locked(phase: str = ""):
+    """
+    在已持有 simulation_lock 的前提下安全执行 viewer.sync()。
+    若 viewer 同步失败，不中断仿真主循环。
+    """
+    if not is_viewer_running():
+        return
+    try:
+        viewer_handle.sync()
+    except Exception as e:
+        tag = f"({phase})" if phase else ""
+        print(f"⚠️ viewer 同步失败{tag}: {str(e)}")
 
 
 def normalize_gripper_target(raw_target: float) -> tuple[float, float]:
@@ -47,6 +97,229 @@ def normalize_gripper_target(raw_target: float) -> tuple[float, float]:
     angle = float(np.clip(value, GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX))
     ctrl = float(np.interp(angle, [GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX], [GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX]))
     return angle, ctrl
+
+
+def clamp_arm_joint_target(joint_name: str, target: float) -> float:
+    """按 MuJoCo 模型中的关节限位夹紧角度目标。"""
+    if model is None:
+        return float(target)
+
+    joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    if joint_id < 0:
+        return float(target)
+
+    if model.jnt_limited[joint_id]:
+        lower, upper = model.jnt_range[joint_id]
+        return float(np.clip(target, lower, upper))
+    return float(target)
+
+
+def configure_arm_actuators_from_joint_limits():
+    """
+    启动时强制对齐执行器控制范围与力矩范围，避免控制面板旋钮范围异常。
+    """
+    if model is None:
+        return
+
+    for joint_name in UR5_ARM_JOINTS:
+        actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, joint_name)
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        if actuator_id < 0 or joint_id < 0:
+            continue
+
+        if model.jnt_limited[joint_id]:
+            lower, upper = model.jnt_range[joint_id]
+        else:
+            lower, upper = -2 * np.pi, 2 * np.pi
+
+        model.actuator_ctrllimited[actuator_id] = 1
+        model.actuator_ctrlrange[actuator_id][0] = float(lower)
+        model.actuator_ctrlrange[actuator_id][1] = float(upper)
+
+        force_lower, force_upper = UR5_ACTUATOR_FORCE_RANGES[joint_name]
+        model.actuator_forcelimited[actuator_id] = 1
+        model.actuator_forcerange[actuator_id][0] = force_lower
+        model.actuator_forcerange[actuator_id][1] = force_upper
+
+
+def set_joint_position_locked(joint_name: str, target: float):
+    """直接同步关节位置，确保前端控制与 MuJoCo 状态一一对应。"""
+    joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    if joint_id < 0:
+        return
+
+    qpos_idx = model.jnt_qposadr[joint_id]
+    qvel_idx = model.jnt_dofadr[joint_id]
+    if qpos_idx >= 0:
+        data.qpos[qpos_idx] = target
+    if qvel_idx >= 0:
+        data.qvel[qvel_idx] = 0.0
+
+
+def sync_robot_pose_from_ctrl_locked():
+    """
+    将执行器控制量直接映射到关节位置，确保:
+    1) MuJoCo 控制面板拖动 ctrl 时，机器人立即同步
+    2) 前端/后端角度一一对应，不受执行器追踪动态延迟影响
+    """
+    for joint_name in UR5_ARM_JOINTS:
+        actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, joint_name)
+        if actuator_id < 0:
+            continue
+        target = clamp_arm_joint_target(joint_name, float(data.ctrl[actuator_id]))
+        data.ctrl[actuator_id] = target
+        set_joint_position_locked(joint_name, target)
+
+    fingers_actuator_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_ACTUATOR,
+        "fingers_actuator"
+    )
+    if fingers_actuator_id >= 0:
+        gripper_ctrl = float(np.clip(data.ctrl[fingers_actuator_id], GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX))
+        data.ctrl[fingers_actuator_id] = gripper_ctrl
+        gripper_angle = float(np.interp(
+            gripper_ctrl,
+            [GRIPPER_CTRL_MIN, GRIPPER_CTRL_MAX],
+            [GRIPPER_ANGLE_MIN, GRIPPER_ANGLE_MAX]
+        ))
+        set_joint_position_locked("left_driver_joint", gripper_angle)
+        set_joint_position_locked("right_driver_joint", gripper_angle)
+
+
+def build_robot_state_payload_locked() -> dict:
+    """在已持有 simulation_lock 的前提下，构建机器人状态载荷。"""
+    states = []
+    qpos_list = []
+    qvel_list = []
+
+    for joint_name in UR5_ARM_JOINTS:
+        joint_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            joint_name
+        )
+        if joint_id < 0:
+            continue
+
+        qpos_idx = model.jnt_qposadr[joint_id]
+        qvel_idx = model.jnt_dofadr[joint_id]
+
+        position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
+        velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
+
+        states.append({
+            "joint_name": joint_name,
+            "position": position,
+            "velocity": velocity
+        })
+        qpos_list.append(position)
+        qvel_list.append(velocity)
+
+    gripper_position = None
+    gripper_joint_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_JOINT,
+        "left_driver_joint"
+    )
+    if gripper_joint_id >= 0:
+        gripper_qpos_idx = model.jnt_qposadr[gripper_joint_id]
+        if gripper_qpos_idx >= 0:
+            gripper_position = float(data.qpos[gripper_qpos_idx])
+
+    return {
+        "joints": states,
+        "qpos": qpos_list,
+        "qvel": qvel_list,
+        "gripper_position": gripper_position
+    }
+
+
+def apply_control_input_locked(control_input: "ControlInput") -> dict:
+    """
+    在已持有 simulation_lock 的前提下应用控制输入。
+    返回与 REST 接口兼容的响应数据。
+    """
+    arm_targets = control_input.target_angles[:6]
+    gripper_target = control_input.gripper_position
+    if gripper_target is None and len(control_input.target_angles) == 7:
+        gripper_target = control_input.target_angles[6]
+
+    applied_arm_targets = []
+    for i, actuator_name in enumerate(UR5_ARM_JOINTS):
+        actuator_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_ACTUATOR,
+            actuator_name
+        )
+        target = clamp_arm_joint_target(actuator_name, arm_targets[i])
+        applied_arm_targets.append(target)
+
+        if actuator_id >= 0:
+            data.ctrl[actuator_id] = target
+        # 直接同步到关节位置，避免执行器缓慢追目标导致前后端不同步。
+        set_joint_position_locked(actuator_name, target)
+
+    gripper_angle = None
+    if gripper_target is not None:
+        gripper_angle, gripper_ctrl = normalize_gripper_target(gripper_target)
+        gripper_actuator_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_ACTUATOR,
+            "fingers_actuator"
+        )
+        if gripper_actuator_id >= 0:
+            data.ctrl[gripper_actuator_id] = gripper_ctrl
+        set_joint_position_locked("left_driver_joint", gripper_angle)
+        set_joint_position_locked("right_driver_joint", gripper_angle)
+
+    mujoco.mj_forward(model, data)
+    safe_viewer_sync_locked("apply_control")
+
+    return {
+        "status": "success",
+        "message": "已更新机械臂目标角度" + ("与 gripper 开合" if gripper_target is not None else ""),
+        "target_angles": applied_arm_targets,
+        "gripper_position": gripper_angle,
+        "current_ctrl": data.ctrl.tolist()
+    }
+
+
+async def register_ws_client(websocket: WebSocket):
+    global ws_clients_lock
+    if ws_clients_lock is None:
+        ws_clients_lock = asyncio.Lock()
+    async with ws_clients_lock:
+        ws_clients.add(websocket)
+
+
+async def unregister_ws_client(websocket: WebSocket):
+    if ws_clients_lock is None:
+        return
+    async with ws_clients_lock:
+        ws_clients.discard(websocket)
+
+
+async def broadcast_state(payload: dict):
+    if ws_clients_lock is None:
+        return
+    async with ws_clients_lock:
+        clients = list(ws_clients)
+
+    if not clients:
+        return
+
+    results = await asyncio.gather(
+        *(client.send_json({"type": "state", "state": payload}) for client in clients),
+        return_exceptions=True
+    )
+    stale_clients = [client for client, result in zip(clients, results) if isinstance(result, Exception)]
+    if not stale_clients:
+        return
+
+    async with ws_clients_lock:
+        for client in stale_clients:
+            ws_clients.discard(client)
 
 
 # ==================== Pydantic 模型 ====================
@@ -158,6 +431,7 @@ async def lifespan(app: FastAPI):
             with simulation_lock:
                 model = mujoco.MjModel.from_xml_path(temp_model_path)
                 data = mujoco.MjData(model)
+                configure_arm_actuators_from_joint_limits()
 
                 # 验证模型
                 mujoco.mj_forward(model, data)
@@ -245,27 +519,42 @@ async def simulation_loop():
 
     simulation_running = True
     wall_dt = 0.01  # 100Hz 主循环
+    last_state_push_at = 0.0
 
     print("🚀 仿真循环已启动")
 
     while simulation_running:
         try:
             cycle_start = asyncio.get_running_loop().time()
+            state_payload = None
             if model is not None and data is not None:
                 with simulation_lock:
+                    # 先同步 viewer 输入，确保 MuJoCo 面板拖动 ctrl 能在本周期生效。
+                    safe_viewer_sync_locked("pre_step")
+
                     # 按 MuJoCo timestep 批量推进，避免仿真时间明显慢于真实时间。
                     step_count = max(1, round(wall_dt / model.opt.timestep))
                     for _ in range(step_count):
+                        sync_robot_pose_from_ctrl_locked()
                         mujoco.mj_step(model, data)
-                    if viewer_handle is not None and viewer_handle.is_running():
-                        viewer_handle.sync()
+                    sync_robot_pose_from_ctrl_locked()
+                    mujoco.mj_forward(model, data)
+                    safe_viewer_sync_locked("post_step")
+                    now = asyncio.get_running_loop().time()
+                    if now - last_state_push_at >= STATE_PUSH_INTERVAL:
+                        state_payload = build_robot_state_payload_locked()
+                        last_state_push_at = now
+
+            if state_payload is not None:
+                await broadcast_state(state_payload)
 
             elapsed = asyncio.get_running_loop().time() - cycle_start
             await asyncio.sleep(max(0.0, wall_dt - elapsed))
 
         except Exception as e:
             print(f"仿真错误：{str(e)}")
-            break
+            await asyncio.sleep(SIMULATION_ERROR_BACKOFF)
+            continue
 
     print("⏹️ 仿真循环已停止")
 
@@ -297,7 +586,8 @@ async def root():
         "message": "UR5 MuJoCo Simulation Server",
         "endpoints": [
             "GET /state - 获取机器人状态",
-            "POST /control - 发送控制指令（支持 gripper_position）"
+            "POST /control - 发送控制指令（支持 gripper_position）",
+            "WS  /ws/robot - 实时双向状态/控制通道"
         ]
     }
 
@@ -313,61 +603,9 @@ async def get_robot_state():
 
     try:
         with simulation_lock:
-            # 提取 UR5 的 6 个主要关节
-            ur5_joints = [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint"
-            ]
+            payload = build_robot_state_payload_locked()
 
-            states = []
-            qpos_list = []
-            qvel_list = []
-
-            # 遍历所有关节，提取状态
-            for i in range(model.njnt):
-                joint_name = mujoco.mj_id2name(
-                    model, mujoco.mjtObj.mjOBJ_JOINT, i)
-
-                # 只返回 UR5 的主要关节
-                if joint_name in ur5_joints:
-                    # 获取关节位置索引
-                    qpos_idx = model.jnt_qposadr[i]
-                    qvel_idx = model.jnt_dofadr[i]
-
-                    # 读取位置和速度
-                    position = float(data.qpos[qpos_idx]) if qpos_idx >= 0 else 0.0
-                    velocity = float(data.qvel[qvel_idx]) if qvel_idx >= 0 else 0.0
-
-                    states.append(JointState(
-                        joint_name=joint_name,
-                        position=position,
-                        velocity=velocity
-                    ))
-
-                    qpos_list.append(position)
-                    qvel_list.append(velocity)
-
-            gripper_position = None
-            gripper_joint_id = mujoco.mj_name2id(
-                model,
-                mujoco.mjtObj.mjOBJ_JOINT,
-                "left_driver_joint"
-            )
-            if gripper_joint_id >= 0:
-                gripper_qpos_idx = model.jnt_qposadr[gripper_joint_id]
-                if gripper_qpos_idx >= 0:
-                    gripper_position = float(data.qpos[gripper_qpos_idx])
-
-        return RobotState(
-            joints=states,
-            qpos=qpos_list,
-            qvel=qvel_list,
-            gripper_position=gripper_position
-        )
+        return RobotState(**payload)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取状态失败：{str(e)}")
@@ -391,60 +629,81 @@ async def set_robot_control(control_input: ControlInput):
 
     try:
         with simulation_lock:
-            # 获取执行器 ID 映射
-            ur5_joints = [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint"
-            ]
-            arm_targets = control_input.target_angles[:6]
-            gripper_target = control_input.gripper_position
-            if gripper_target is None and len(control_input.target_angles) == 7:
-                gripper_target = control_input.target_angles[6]
+            response = apply_control_input_locked(control_input)
 
-            # 更新机械臂执行器的控制信号
-            for i, actuator_name in enumerate(ur5_joints):
-                actuator_id = mujoco.mj_name2id(
-                    model,
-                    mujoco.mjtObj.mjOBJ_ACTUATOR,
-                    actuator_name
-                )
-
-                if actuator_id >= 0:
-                    # 设置目标位置到 ctrl 数组
-                    data.ctrl[actuator_id] = arm_targets[i]
-
-            gripper_angle = None
-            if gripper_target is not None:
-                gripper_angle, gripper_ctrl = normalize_gripper_target(gripper_target)
-                gripper_actuator_id = mujoco.mj_name2id(
-                    model,
-                    mujoco.mjtObj.mjOBJ_ACTUATOR,
-                    "fingers_actuator"
-                )
-                if gripper_actuator_id >= 0:
-                    data.ctrl[gripper_actuator_id] = gripper_ctrl
-
-            # 前向动力学计算并同步 viewer
-            mujoco.mj_forward(model, data)
-            if viewer_handle is not None and viewer_handle.is_running():
-                viewer_handle.sync()
-
-            current_ctrl = data.ctrl.tolist()
-
-        return {
-            "status": "success",
-            "message": "已更新机械臂目标角度" + ("与 gripper 开合" if gripper_target is not None else ""),
-            "target_angles": arm_targets,
-            "gripper_position": gripper_angle,
-            "current_ctrl": current_ctrl
-        }
+        return response
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"控制指令执行失败：{str(e)}")
+
+
+@app.websocket("/ws/robot")
+async def robot_realtime_ws(websocket: WebSocket):
+    """
+    实时双向通道：
+    - 服务端主动推送 state（仿真循环中 50Hz）
+    - 客户端可发送 control 指令（与 REST /control 语义一致）
+    """
+    await websocket.accept()
+    await register_ws_client(websocket)
+
+    try:
+        if model is not None and data is not None:
+            with simulation_lock:
+                initial_state = build_robot_state_payload_locked()
+            await websocket.send_json({"type": "state", "state": initial_state})
+
+        while True:
+            message = await websocket.receive_json()
+            msg_type = message.get("type")
+
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            if msg_type == "control":
+                request_id = message.get("request_id")
+                try:
+                    control_input = ControlInput(
+                        target_angles=message.get("target_angles", []),
+                        gripper_position=message.get("gripper_position"),
+                    )
+                except Exception as control_error:
+                    await websocket.send_json({
+                        "type": "error",
+                        "request_id": request_id,
+                        "message": f"控制参数无效：{str(control_error)}"
+                    })
+                    continue
+
+                if len(control_input.target_angles) not in (6, 7):
+                    await websocket.send_json({
+                        "type": "error",
+                        "request_id": request_id,
+                        "message": f"需要 6 个机械臂目标角度，或 6 个角度加 1 个 gripper 值，收到 {len(control_input.target_angles)} 个"
+                    })
+                    continue
+
+                with simulation_lock:
+                    response = apply_control_input_locked(control_input)
+                    state_payload = build_robot_state_payload_locked()
+                await websocket.send_json({"type": "control_ack", "request_id": request_id, "data": response})
+                await websocket.send_json({"type": "state", "state": state_payload})
+                continue
+
+            await websocket.send_json({
+                "type": "error",
+                "message": f"未知消息类型：{msg_type}"
+            })
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": f"WebSocket 异常：{str(e)}"})
+        except Exception:
+            pass
+    finally:
+        await unregister_ws_client(websocket)
 
 
 @app.get("/joint/{joint_name}")
@@ -514,8 +773,7 @@ async def reset_simulation():
             # 重置到初始状态
             mujoco.mj_resetData(model, data)
             mujoco.mj_forward(model, data)
-            if viewer_handle is not None and viewer_handle.is_running():
-                viewer_handle.sync()
+            safe_viewer_sync_locked("reset")
 
         return {
             "status": "success",

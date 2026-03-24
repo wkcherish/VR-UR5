@@ -9,6 +9,20 @@ export const JOINT_ORDER = [
 
 export type JointName = (typeof JOINT_ORDER)[number]
 
+export const JOINT_LIMITS: Record<JointName, { lower: number; upper: number }> = {
+  shoulder_pan_joint: { lower: -2 * Math.PI, upper: 2 * Math.PI },
+  shoulder_lift_joint: { lower: -2 * Math.PI, upper: 2 * Math.PI },
+  elbow_joint: { lower: -Math.PI, upper: Math.PI },
+  wrist_1_joint: { lower: -2 * Math.PI, upper: 2 * Math.PI },
+  wrist_2_joint: { lower: -2 * Math.PI, upper: 2 * Math.PI },
+  wrist_3_joint: { lower: -2 * Math.PI, upper: 2 * Math.PI },
+}
+
+export const clampJointAngle = (jointName: JointName, value: number): number => {
+  const { lower, upper } = JOINT_LIMITS[jointName]
+  return Math.min(upper, Math.max(lower, value))
+}
+
 export interface JointState {
   joint_name: string
   position: number

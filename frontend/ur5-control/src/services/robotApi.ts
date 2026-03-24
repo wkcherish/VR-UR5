@@ -24,6 +24,14 @@ apiClient.interceptors.response.use(
   },
 )
 
+type RealtimeControlTransport = (payload: ControlInput) => Promise<ControlResponse>
+
+let realtimeControlTransport: RealtimeControlTransport | null = null
+
+export const setRealtimeControlTransport = (transport: RealtimeControlTransport | null) => {
+  realtimeControlTransport = transport
+}
+
 export const robotApi = {
   async getState(): Promise<RobotState> {
     const { data } = await apiClient.get<RobotState>('/state')
@@ -31,6 +39,11 @@ export const robotApi = {
   },
 
   async control(payload: ControlInput): Promise<ControlResponse> {
+    if (realtimeControlTransport) {
+      try {
+        return await realtimeControlTransport(payload)
+      } catch {}
+    }
     const { data } = await apiClient.post<ControlResponse>('/control', payload)
     return data
   },

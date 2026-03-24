@@ -1,3 +1,4 @@
+import { clampJointAngle } from '@/types/robot'
 import type { JointAngles, JointName } from '@/types/robot'
 import type { XRControllerState } from '@/utils/xr/WebXRManager'
 
@@ -28,8 +29,6 @@ const normalizeAxis = (value: number) => (Math.abs(value) < deadzone ? 0 : value
 
 const isPressed = (buttons: number[], index: number) => (buttons[index] ?? 0) > 0.5
 
-const clampAngle = (value: number) => Math.min(Math.PI, Math.max(-Math.PI, value))
-
 const getDirectionLabel = (stickX: number, stickY: number) => {
   if (stickX === 0 && stickY === 0) {
     return '等待摇杆输入'
@@ -50,7 +49,7 @@ const createUpdates = (
       continue
     }
     const typedJointName = jointName as JointName
-    updates[typedJointName] = clampAngle(currentAngles[typedJointName] + offset)
+    updates[typedJointName] = clampJointAngle(typedJointName, currentAngles[typedJointName] + offset)
   }
   return updates
 }
