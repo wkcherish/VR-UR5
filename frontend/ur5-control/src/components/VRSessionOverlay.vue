@@ -13,6 +13,8 @@ const props = defineProps<{
   controlSummary: string
   directionLabel: string
   highlightedLabels: string[]
+  connectionLabel: string
+  jointSummary: string
 }>()
 
 const emit = defineEmits<{
@@ -63,8 +65,10 @@ const formatHandedness = (handedness: XRControllerState['handedness']) => {
       <article class="vr-overlay__card vr-overlay__card--wide">
         <span>当前输入</span>
         <strong>{{ activeInput ?? '未检测' }}</strong>
+        <p>{{ connectionLabel }}</p>
         <p>{{ controlSummary }}</p>
         <p>{{ directionLabel }}</p>
+        <p>关节目标：{{ jointSummary }}</p>
         <p>高亮关节：{{ highlightedLabels.join(' / ') || '暂无' }}</p>
       </article>
 

@@ -1,5 +1,6 @@
 import { defineConfig, type PreviewServer, type ResolvedServerUrls, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import basicSsl from '@vitejs/plugin-basic-ssl'
 import path from 'path'
 
 function scoreNetworkUrl(url: string): number {
@@ -57,7 +58,7 @@ function compactNetworkUrlsPlugin() {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue(), compactNetworkUrlsPlugin()],
+  plugins: [vue(), basicSsl(), compactNetworkUrlsPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -65,6 +66,7 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    https: {},
     host: '0.0.0.0', // 允许局域网访问
     proxy: {
       '/api': {

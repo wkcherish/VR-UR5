@@ -9,7 +9,7 @@ export class SceneManager {
   readonly renderer: THREE.WebGLRenderer
   readonly controls: OrbitControls
   private container: HTMLElement
-  private animationFrameId: number | null = null
+  private running = false
   private renderHook: RenderHook | null = null
 
   constructor(container: HTMLElement) {
@@ -75,21 +75,19 @@ export class SceneManager {
     this.renderHook?.()
     this.controls.update()
     this.renderer.render(this.scene, this.camera)
-    this.animationFrameId = window.requestAnimationFrame(this.loop)
   }
 
   start() {
-    if (this.animationFrameId !== null) {
+    if (this.running) {
       return
     }
-    this.loop()
+    this.running = true
+    this.renderer.setAnimationLoop(this.loop)
   }
 
   stop() {
-    if (this.animationFrameId !== null) {
-      window.cancelAnimationFrame(this.animationFrameId)
-      this.animationFrameId = null
-    }
+    this.renderer.setAnimationLoop(null)
+    this.running = false
   }
 
   dispose() {

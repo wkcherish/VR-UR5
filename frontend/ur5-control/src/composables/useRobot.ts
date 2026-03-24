@@ -2,6 +2,7 @@ import { onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRobotStore } from '@/stores/robot'
 import { setRealtimeControlTransport } from '@/services/robotApi'
+import { resolveApiBaseUrl } from '@/services/apiBase'
 import type { ControlInput, ControlResponse, RobotState } from '@/types/robot'
 
 interface UseRobotOptions {
@@ -40,7 +41,7 @@ export const useRobot = (options: UseRobotOptions = {}) => {
   const REALTIME_CONTROL_ACK_TIMEOUT_MS = 700
 
   const toWsUrl = () => {
-    const apiBase = import.meta.env.VITE_API_URL || '/api'
+    const apiBase = resolveApiBaseUrl()
     const normalize = (value: string) => value.replace(/\/+$/, '')
 
     if (apiBase.startsWith('http://') || apiBase.startsWith('https://')) {

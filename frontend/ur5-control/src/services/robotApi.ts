@@ -6,9 +6,10 @@ import type {
   JointState,
   RobotState,
 } from '@/types/robot'
+import { resolveApiBaseUrl } from '@/services/apiBase'
 
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
+  baseURL: resolveApiBaseUrl(),
   timeout: 5000,
   headers: {
     'Content-Type': 'application/json',
