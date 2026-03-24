@@ -60,6 +60,7 @@ const HAND_HINT_SECONDARY_ACTIVE_COLOR = new THREE.Color(0xfb7185)
 const HAND_HINT_MARKER_RADIUS_M = 0.009
 const PINCH_CLOSE_DISTANCE_M = 0.018
 const PINCH_RELEASE_DISTANCE_M = 0.055
+const HAND_TRACKING_GRACE_MS = 650
 
 const createSupportState = (): XRSupportState => ({ ar: false, vr: false })
 
@@ -79,6 +80,7 @@ export class WebXRManager {
   private readonly hudMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
   private readonly worldPointA = new THREE.Vector3()
   private readonly worldPointB = new THREE.Vector3()
+  private readonly handTrackingLastSeenAt: number[] = Array(MAX_CONTROLLER_COUNT).fill(0)
 
   private supportState: XRSupportState = createSupportState()
   private session: XRSession | null = null
@@ -114,7 +116,8 @@ export class WebXRManager {
       const hand = this.renderer.xr.getHand(index)
 
       grip.add(controllerModelFactory.createControllerModel(grip))
-      hand.add(handModelFactory.createHandModel(hand, 'mesh'))
+      // Spheres are more stable across Quest browser/runtime variants.
+      hand.add(handModelFactory.createHandModel(hand, 'spheres'))
       hand.add(this.createHandMarker())
       const debugMarkers = this.createHandDebugMarkers()
       hand.add(debugMarkers.root)
@@ -241,13 +244,12 @@ export class WebXRManager {
   }
 
   private updateHandDebugMarkers() {
-    const sources = this.session?.inputSources ?? []
+    const sources = Array.from(this.session?.inputSources ?? [])
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
-      const source = sources[index]
+      const source = this.getInputSourceForIndex(index, sources)
       const handMode = this.inputMode === 'hand'
       const hand = this.hands[index]
-      const hasJointTracking = Boolean(this.getHandJointNode(hand, 'wrist') || this.getHandJointNode(hand, 'index-finger-tip'))
-      const hasHandTracking = handMode && (Boolean(source?.hand) || hasJointTracking)
+      const hasHandTracking = handMode && this.getHandTrackingState(index, source, hand).trackedOrRecent
       const markers = this.handDebugMarkers[index]
       markers.root.visible = hasHandTracking
       if (!handMode) {
@@ -286,6 +288,26 @@ export class WebXRManager {
   private getHandJointNode(hand: THREE.Group, jointName: string) {
     const maybeHand = hand as THREE.Group & { joints?: Record<string, THREE.Object3D> }
     return maybeHand.joints?.[jointName] ?? null
+  }
+
+  private getInputSourceForIndex(index: number, sources: readonly XRInputSource[]) {
+    const handedness = index === 0 ? 'left' : 'right'
+    return sources.find((source) => source.handedness === handedness) ?? sources[index]
+  }
+
+  private getHandTrackingState(index: number, source: XRInputSource | undefined, hand: THREE.Group) {
+    const now = performance.now()
+    const hasJointTracking = Boolean(this.getHandJointNode(hand, 'wrist') || this.getHandJointNode(hand, 'index-finger-tip'))
+    const trackedNow = Boolean(source?.hand) || hasJointTracking
+
+    if (trackedNow) {
+      this.handTrackingLastSeenAt[index] = now
+    }
+
+    const recentlyTracked = now - this.handTrackingLastSeenAt[index] <= HAND_TRACKING_GRACE_MS
+    return {
+      trackedOrRecent: trackedNow || recentlyTracked,
+    }
   }
 
   private getHandPinchStrength(hand: THREE.Group, fingerJointName: string) {
@@ -407,7 +429,9 @@ export class WebXRManager {
 
   private updateActiveInputFromSources() {
     const sources = Array.from(this.session?.inputSources ?? [])
-    const hasHand = sources.some((source) => Boolean(source.hand))
+    const hasHand = this.hands.some((hand, index) =>
+      this.getHandTrackingState(index, this.getInputSourceForIndex(index, sources), hand).trackedOrRecent,
+    )
     const hasController = sources.some((source) => Boolean(source.gamepad))
 
     if (this.inputMode === 'hand' && hasHand) {
@@ -430,14 +454,13 @@ export class WebXRManager {
   }
 
   private updateInputVisuals() {
-    const sources = this.session?.inputSources ?? []
+    const sources = Array.from(this.session?.inputSources ?? [])
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
-      const source = sources[index]
+      const source = this.getInputSourceForIndex(index, sources)
       const hasControllerInput = Boolean(source?.gamepad)
       const handMode = this.inputMode === 'hand'
       const hand = this.hands[index]
-      const hasJointTracking = Boolean(this.getHandJointNode(hand, 'wrist') || this.getHandJointNode(hand, 'index-finger-tip'))
-      const hasHandTracking = Boolean(source?.hand) || hasJointTracking
+      const hasHandTracking = this.getHandTrackingState(index, source, hand).trackedOrRecent
 
       this.controllers[index].visible = this.inputMode === 'controller' && hasControllerInput
       this.controllerGrips[index].visible = this.inputMode === 'controller' && hasControllerInput
@@ -449,6 +472,7 @@ export class WebXRManager {
   private cleanupSessionState() {
     this.session = null
     this.sessionMode = null
+    this.handTrackingLastSeenAt.fill(0)
     this.setActiveInput('none')
     this.hudMesh.visible = false
     this.updateInputVisuals()
@@ -731,19 +755,18 @@ export class WebXRManager {
   }
 
   getControllerStates() {
-    const inputSources = this.session?.inputSources ?? []
+    const inputSources = Array.from(this.session?.inputSources ?? [])
     const states: XRControllerState[] = []
 
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
       const controller = this.controllers[index]
       const hand = this.hands[index]
-      const source = inputSources[index]
+      const source = this.getInputSourceForIndex(index, inputSources)
       const gamepad = source?.gamepad
       const buttons = gamepad?.buttons.map((button) => button.value) ?? []
       const wrist = this.getHandJointNode(hand, 'wrist')
       const indexTip = this.getHandJointNode(hand, 'index-finger-tip')
-      const hasJointTracking = Boolean(wrist || indexTip)
-      const hasHandTracking = Boolean(source?.hand) || hasJointTracking
+      const hasHandTracking = this.getHandTrackingState(index, source, hand).trackedOrRecent
       const trackedNode = hasHandTracking ? hand : controller
       const trackedPosition = new THREE.Vector3()
       const trackedQuaternion = new THREE.Quaternion()
