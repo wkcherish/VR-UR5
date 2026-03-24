@@ -13,7 +13,12 @@ import {
   type XRInteractionMode,
   type XRSessionModeType,
 } from '@/utils/xr/WebXRManager'
-import { createXRControlSmoothingState, resolveXRControllerCommand } from '@/utils/xr/xrControl'
+import {
+  createXRControlSmoothingState,
+  createXRHandControlState,
+  resolveXRControllerCommand,
+  resolveXRHandCommand,
+} from '@/utils/xr/xrControl'
 
 const viewerRef = ref<InstanceType<typeof RobotViewer> | null>(null)
 const {
@@ -55,6 +60,14 @@ const JOINT_LABELS: Record<JointName, string> = {
   wrist_2_joint: '手腕二关节',
   wrist_3_joint: '手腕三关节',
 }
+
+const getDefaultXRControlSummary = (mode: XRInteractionMode) =>
+  mode === 'controller'
+    ? '按住左手 Grip / Y / X 选择关节组'
+    : '双手：左手捏合选组，右手食指捏合拖拽；单手：无名指切组 + 食指拖拽'
+
+const getDefaultXRDirectionLabel = (mode: XRInteractionMode) =>
+  mode === 'controller' ? '摇杆静止' : '手部静止'
 
 const jointList = computed(() =>
   JOINT_ORDER.map((jointName) => ({
@@ -142,8 +155,8 @@ const xrInputMode = ref<XRInteractionMode>('controller')
 const xrActiveInput = ref<XRActiveInputKind>('none')
 const xrControllers = ref<XRControllerState[]>([])
 const xrStatusMessage = ref('等待 3D 场景初始化')
-const xrControlSummary = ref('按住左手 Grip / Y / X 选择关节组')
-const xrDirectionLabel = ref('摇杆静止')
+const xrControlSummary = ref(getDefaultXRControlSummary(xrInputMode.value))
+const xrDirectionLabel = ref(getDefaultXRDirectionLabel(xrInputMode.value))
 const xrHighlightedJoints = ref<JointName[]>([])
 
 let stopXRSessionListener: (() => void) | null = null
@@ -151,6 +164,7 @@ let stopXRInputListener: (() => void) | null = null
 let lastXRCommandAt = 0
 let xrCommandInFlight = false
 const xrSmoothingState = createXRControlSmoothingState(targetGripperPosition.value)
+const xrHandState = createXRHandControlState(targetGripperPosition.value)
 
 const isXRSessionActive = computed(() => xrSessionMode.value !== null)
 const highlightedJointSet = computed(() => new Set(xrHighlightedJoints.value))
@@ -160,9 +174,9 @@ const xrJointSummary = computed(() =>
   JOINT_ORDER.map((jointName) => `${JOINT_LABELS[jointName]} ${targetAngles.value[jointName].toFixed(2)}`).join(' | '),
 )
 
-const resetXRFeedback = () => {
-  xrControlSummary.value = '按住左手 Grip / Y / X 选择关节组'
-  xrDirectionLabel.value = '摇杆静止'
+const resetXRFeedback = (mode: XRInteractionMode = xrInputMode.value) => {
+  xrControlSummary.value = getDefaultXRControlSummary(mode)
+  xrDirectionLabel.value = getDefaultXRDirectionLabel(mode)
   xrHighlightedJoints.value = []
 }
 
@@ -189,10 +203,34 @@ const refreshXRSupport = async () => {
   }
 }
 
-const updateXRInputMode = (mode: XRInteractionMode) => {
+const updateXRInputMode = async (mode: XRInteractionMode) => {
+  const manager = xrManager.value
   xrInputMode.value = mode
-  xrManager.value?.setInputMode(mode)
-  resetXRFeedback()
+  manager?.setInputMode(mode)
+  if (mode === 'hand') {
+    xrHandState.activeGroup = 'wrist'
+    xrHandState.groupCycleLatched = false
+    xrHandState.isDragging = false
+    xrHandState.dragReleaseAt = null
+    xrHandState.lastTrackedAt = 0
+    xrHandState.previousRightX = null
+    xrHandState.previousRightY = null
+  }
+  resetXRFeedback(mode)
+  if (!manager?.isSessionActive()) {
+    return
+  }
+  if (mode !== 'hand') {
+    return
+  }
+  try {
+    xrStatusMessage.value = '正在切换到手势追踪模式...'
+    await manager.refreshSessionInputMode(mode)
+    xrStatusMessage.value = '手势追踪已就绪'
+    lastXRCommandAt = 0
+  } catch (nextError) {
+    xrStatusMessage.value = nextError instanceof Error ? nextError.message : '手势模式切换失败'
+  }
 }
 
 const enterXRMode = async (mode: XRSessionModeType) => {
@@ -206,7 +244,7 @@ const enterXRMode = async (mode: XRSessionModeType) => {
     return
   }
   try {
-    await manager.startSession(mode)
+    await manager.startSession(mode, { preferHandTracking: xrInputMode.value === 'hand' })
     xrSessionMode.value = manager.getSessionMode()
     xrStatusMessage.value = `已进入 ${mode} 会话`
     lastXRCommandAt = 0
@@ -258,21 +296,19 @@ const handleXRFrame = () => {
   }
 
   xrSessionMode.value = manager.getSessionMode()
-
-  if (xrInputMode.value !== 'controller') {
-    xrControlSummary.value = '手势模式中，手柄映射已暂停'
-    xrDirectionLabel.value = '由手势输入驱动'
-    xrHighlightedJoints.value = []
-    updateXRHud()
-    return
-  }
-
-  const feedback = resolveXRControllerCommand(
-    xrControllers.value,
-    targetAngles.value,
-    targetGripperPosition.value,
-    xrSmoothingState,
-  )
+  const feedback = xrInputMode.value === 'controller'
+    ? resolveXRControllerCommand(
+      xrControllers.value,
+      targetAngles.value,
+      targetGripperPosition.value,
+      xrSmoothingState,
+    )
+    : resolveXRHandCommand(
+      xrControllers.value,
+      targetAngles.value,
+      targetGripperPosition.value,
+      xrHandState,
+    )
   xrControlSummary.value = feedback.summary
   xrDirectionLabel.value = feedback.directionLabel
   xrHighlightedJoints.value = feedback.highlightedJoints
@@ -361,6 +397,7 @@ watch(
   (nextGripperPosition) => {
     if (!isXRSessionActive.value) {
       xrSmoothingState.gripper = nextGripperPosition
+      xrHandState.gripper = nextGripperPosition
     }
   },
 )

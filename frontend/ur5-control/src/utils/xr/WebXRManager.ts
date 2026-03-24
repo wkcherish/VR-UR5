@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory.js'
+import { XRHandModelFactory } from 'three/examples/jsm/webxr/XRHandModelFactory.js'
 
 export type XRSessionModeType = 'inline' | 'immersive-ar' | 'immersive-vr'
 export type XRInteractionMode = 'controller' | 'hand'
@@ -23,6 +24,11 @@ export interface XRControllerState {
   connected: boolean
   handedness: XRHandedness | 'unknown'
   hasHandTracking: boolean
+  handPinch: {
+    index: number
+    middle: number
+    ring: number
+  } | null
   position: THREE.Vector3
   quaternion: THREE.Quaternion
   axes: number[]
@@ -30,11 +36,30 @@ export interface XRControllerState {
   selecting: boolean
 }
 
+export interface XRSessionStartOptions {
+  preferHandTracking?: boolean
+}
+
 type SessionEventListener = (isActive: boolean) => void
 type ActiveInputListener = (activeInput: XRActiveInputKind) => void
 
+interface XRHandDebugMarkers {
+  root: THREE.Group
+  palm: THREE.Mesh
+  thumbTip: THREE.Mesh
+  indexTip: THREE.Mesh
+  middleTip: THREE.Mesh
+  ringTip: THREE.Mesh
+}
+
 const MAX_CONTROLLER_COUNT = 2
 const HAND_MARKER_COLOR = 0x38bdf8
+const HAND_HINT_OPEN_COLOR = new THREE.Color(0x7dd3fc)
+const HAND_HINT_ACTIVE_COLOR = new THREE.Color(0xf97316)
+const HAND_HINT_SECONDARY_ACTIVE_COLOR = new THREE.Color(0xfb7185)
+const HAND_HINT_MARKER_RADIUS_M = 0.009
+const PINCH_CLOSE_DISTANCE_M = 0.018
+const PINCH_RELEASE_DISTANCE_M = 0.055
 
 const createSupportState = (): XRSupportState => ({ ar: false, vr: false })
 
@@ -45,12 +70,15 @@ export class WebXRManager {
   private readonly controllers: THREE.Group[]
   private readonly controllerGrips: THREE.Group[]
   private readonly hands: THREE.Group[]
+  private readonly handDebugMarkers: XRHandDebugMarkers[]
   private readonly sessionListeners: SessionEventListener[] = []
   private readonly activeInputListeners: ActiveInputListener[] = []
   private readonly hudCanvas: HTMLCanvasElement
   private readonly hudContext: CanvasRenderingContext2D
   private readonly hudTexture: THREE.CanvasTexture
   private readonly hudMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
+  private readonly worldPointA = new THREE.Vector3()
+  private readonly worldPointB = new THREE.Vector3()
 
   private supportState: XRSupportState = createSupportState()
   private session: XRSession | null = null
@@ -75,8 +103,10 @@ export class WebXRManager {
     this.controllers = []
     this.controllerGrips = []
     this.hands = []
+    this.handDebugMarkers = []
 
     const controllerModelFactory = new XRControllerModelFactory()
+    const handModelFactory = new XRHandModelFactory()
 
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
       const controller = this.renderer.xr.getController(index)
@@ -84,11 +114,15 @@ export class WebXRManager {
       const hand = this.renderer.xr.getHand(index)
 
       grip.add(controllerModelFactory.createControllerModel(grip))
+      hand.add(handModelFactory.createHandModel(hand, 'mesh'))
       hand.add(this.createHandMarker())
+      const debugMarkers = this.createHandDebugMarkers()
+      hand.add(debugMarkers.root)
 
       this.controllers.push(controller)
       this.controllerGrips.push(grip)
       this.hands.push(hand)
+      this.handDebugMarkers.push(debugMarkers)
 
       this.scene.add(controller)
       this.scene.add(grip)
@@ -127,15 +161,156 @@ export class WebXRManager {
 
   private createHandMarker() {
     const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(0.01, 10, 10),
+      new THREE.TorusGeometry(0.025, 0.0018, 10, 28),
       new THREE.MeshBasicMaterial({
         color: HAND_MARKER_COLOR,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.65,
+        depthTest: false,
+        depthWrite: false,
       }),
     )
-    marker.position.set(0, 0, -0.02)
+    marker.rotation.x = Math.PI / 2
+    marker.position.set(0, 0, -0.015)
+    marker.renderOrder = 90
     return marker
+  }
+
+  private createHandTipMarker(size = HAND_HINT_MARKER_RADIUS_M) {
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(size, 12, 12),
+      new THREE.MeshBasicMaterial({
+        color: HAND_HINT_OPEN_COLOR.clone(),
+        transparent: true,
+        opacity: 0.7,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    )
+    marker.visible = false
+    marker.renderOrder = 95
+    return marker
+  }
+
+  private createHandDebugMarkers(): XRHandDebugMarkers {
+    const root = new THREE.Group()
+    const palm = this.createHandTipMarker(0.0135)
+    const thumbTip = this.createHandTipMarker()
+    const indexTip = this.createHandTipMarker()
+    const middleTip = this.createHandTipMarker(0.0075)
+    const ringTip = this.createHandTipMarker(0.0075)
+
+    root.add(palm)
+    root.add(thumbTip)
+    root.add(indexTip)
+    root.add(middleTip)
+    root.add(ringTip)
+
+    return {
+      root,
+      palm,
+      thumbTip,
+      indexTip,
+      middleTip,
+      ringTip,
+    }
+  }
+
+  private setTipMarkerVisibility(hand: THREE.Group, marker: THREE.Mesh, node: THREE.Object3D | null) {
+    marker.visible = true
+    if (node) {
+      node.getWorldPosition(this.worldPointA)
+      hand.worldToLocal(this.worldPointA)
+      marker.position.copy(this.worldPointA)
+      return true
+    }
+    return false
+  }
+
+  private setTipMarkerStyle(
+    marker: THREE.Mesh,
+    activeStrength: number,
+    activeColor: THREE.Color,
+    tracked = true,
+  ) {
+    const material = marker.material as THREE.MeshBasicMaterial
+    material.color.copy(HAND_HINT_OPEN_COLOR).lerp(activeColor, activeStrength)
+    material.opacity = (tracked ? 0.62 : 0.34) + activeStrength * 0.33
+    const scale = 0.84 + activeStrength * 0.34
+    marker.scale.setScalar(scale)
+  }
+
+  private updateHandDebugMarkers() {
+    const sources = this.session?.inputSources ?? []
+    for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
+      const source = sources[index]
+      const handMode = this.inputMode === 'hand'
+      const hand = this.hands[index]
+      const hasJointTracking = Boolean(this.getHandJointNode(hand, 'wrist') || this.getHandJointNode(hand, 'index-finger-tip'))
+      const hasHandTracking = handMode && (Boolean(source?.hand) || hasJointTracking)
+      const markers = this.handDebugMarkers[index]
+      markers.root.visible = hasHandTracking
+      if (!handMode) {
+        continue
+      }
+
+      const thumbTip = this.getHandJointNode(hand, 'thumb-tip')
+      const indexTip = this.getHandJointNode(hand, 'index-finger-tip')
+      const middleTip = this.getHandJointNode(hand, 'middle-finger-tip')
+      const ringTip = this.getHandJointNode(hand, 'ring-finger-tip')
+      const wrist = this.getHandJointNode(hand, 'wrist')
+
+      const hasWrist = this.setTipMarkerVisibility(hand, markers.palm, wrist)
+      const hasThumbTip = this.setTipMarkerVisibility(hand, markers.thumbTip, thumbTip)
+      const hasIndexTip = this.setTipMarkerVisibility(hand, markers.indexTip, indexTip)
+      const hasMiddleTip = this.setTipMarkerVisibility(hand, markers.middleTip, middleTip)
+      const hasRingTip = this.setTipMarkerVisibility(hand, markers.ringTip, ringTip)
+
+      const pinchIndex = this.getHandPinchStrength(hand, 'index-finger-tip')
+      const pinchMiddle = this.getHandPinchStrength(hand, 'middle-finger-tip')
+      const pinchRing = this.getHandPinchStrength(hand, 'ring-finger-tip')
+      const tracked = hasHandTracking && (hasWrist || hasThumbTip || hasIndexTip || hasMiddleTip || hasRingTip)
+      this.setTipMarkerStyle(
+        markers.palm,
+        Math.max(pinchIndex, pinchMiddle, pinchRing) * 0.55,
+        HAND_HINT_ACTIVE_COLOR,
+        tracked,
+      )
+      this.setTipMarkerStyle(markers.thumbTip, pinchIndex, HAND_HINT_ACTIVE_COLOR, tracked)
+      this.setTipMarkerStyle(markers.indexTip, pinchIndex, HAND_HINT_ACTIVE_COLOR, tracked)
+      this.setTipMarkerStyle(markers.middleTip, pinchMiddle, HAND_HINT_SECONDARY_ACTIVE_COLOR, tracked)
+      this.setTipMarkerStyle(markers.ringTip, pinchRing, HAND_HINT_SECONDARY_ACTIVE_COLOR, tracked)
+    }
+  }
+
+  private getHandJointNode(hand: THREE.Group, jointName: string) {
+    const maybeHand = hand as THREE.Group & { joints?: Record<string, THREE.Object3D> }
+    return maybeHand.joints?.[jointName] ?? null
+  }
+
+  private getHandPinchStrength(hand: THREE.Group, fingerJointName: string) {
+    const thumbTip = this.getHandJointNode(hand, 'thumb-tip')
+    const fingerTip = this.getHandJointNode(hand, fingerJointName)
+    if (!thumbTip || !fingerTip) {
+      return 0
+    }
+    thumbTip.getWorldPosition(this.worldPointA)
+    fingerTip.getWorldPosition(this.worldPointB)
+    const distance = this.worldPointA.distanceTo(this.worldPointB)
+    const normalized = (PINCH_RELEASE_DISTANCE_M - distance) / (PINCH_RELEASE_DISTANCE_M - PINCH_CLOSE_DISTANCE_M)
+    return Math.min(1, Math.max(0, normalized))
+  }
+
+  private getHandPinchState(index: number, hasHandTracking: boolean) {
+    if (!hasHandTracking) {
+      return null
+    }
+    const hand = this.hands[index]
+    return {
+      index: this.getHandPinchStrength(hand, 'index-finger-tip'),
+      middle: this.getHandPinchStrength(hand, 'middle-finger-tip'),
+      ring: this.getHandPinchStrength(hand, 'ring-finger-tip'),
+    }
   }
 
   private async isModeSupported(mode: XRSessionModeType) {
@@ -259,11 +434,15 @@ export class WebXRManager {
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
       const source = sources[index]
       const hasControllerInput = Boolean(source?.gamepad)
-      const hasHandTracking = Boolean(source?.hand)
+      const handMode = this.inputMode === 'hand'
+      const hand = this.hands[index]
+      const hasJointTracking = Boolean(this.getHandJointNode(hand, 'wrist') || this.getHandJointNode(hand, 'index-finger-tip'))
+      const hasHandTracking = Boolean(source?.hand) || hasJointTracking
 
       this.controllers[index].visible = this.inputMode === 'controller' && hasControllerInput
       this.controllerGrips[index].visible = this.inputMode === 'controller' && hasControllerInput
-      this.hands[index].visible = this.inputMode === 'hand' && hasHandTracking
+      this.hands[index].visible = handMode && hasHandTracking
+      this.handDebugMarkers[index].root.visible = handMode && hasHandTracking
     }
   }
 
@@ -300,8 +479,15 @@ export class WebXRManager {
     return false
   }
 
-  private getSessionInitCandidates(mode: XRSessionModeType): XRSessionInit[] {
+  private getSessionInitCandidates(mode: XRSessionModeType, preferHandTracking = false): XRSessionInit[] {
     if (mode === 'inline') {
+      if (preferHandTracking) {
+        return [
+          { requiredFeatures: ['hand-tracking'] },
+          { optionalFeatures: ['hand-tracking'] },
+          {},
+        ]
+      }
       return [
         { optionalFeatures: ['hand-tracking'] },
         {},
@@ -309,6 +495,30 @@ export class WebXRManager {
     }
 
     if (mode === 'immersive-ar') {
+      if (preferHandTracking) {
+        return [
+          {
+            requiredFeatures: ['hand-tracking'],
+            optionalFeatures: ['local-floor', 'bounded-floor', 'dom-overlay'],
+            domOverlay: { root: document.body },
+          } as XRSessionInit,
+          {
+            requiredFeatures: ['hand-tracking'],
+            optionalFeatures: ['local-floor', 'bounded-floor'],
+          } as XRSessionInit,
+          {
+            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'dom-overlay'],
+            domOverlay: { root: document.body },
+          } as XRSessionInit,
+          {
+            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+          },
+          {
+            optionalFeatures: ['local-floor'],
+          },
+          {},
+        ]
+      }
       return [
         {
           optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'dom-overlay'],
@@ -316,6 +526,34 @@ export class WebXRManager {
         } as XRSessionInit,
         {
           optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+        },
+        {
+          optionalFeatures: ['local-floor'],
+        },
+        {},
+      ]
+    }
+
+    if (preferHandTracking) {
+      return [
+        {
+          requiredFeatures: ['hand-tracking'],
+          optionalFeatures: ['local-floor', 'bounded-floor', 'dom-overlay'],
+          domOverlay: { root: document.body },
+        } as XRSessionInit,
+        {
+          requiredFeatures: ['hand-tracking'],
+          optionalFeatures: ['local-floor', 'bounded-floor'],
+        } as XRSessionInit,
+        {
+          optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'dom-overlay'],
+          domOverlay: { root: document.body },
+        } as XRSessionInit,
+        {
+          optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+        },
+        {
+          optionalFeatures: ['local-floor', 'bounded-floor'],
         },
         {
           optionalFeatures: ['local-floor'],
@@ -342,7 +580,7 @@ export class WebXRManager {
     ]
   }
 
-  async startSession(mode: XRSessionModeType = 'inline') {
+  async startSession(mode: XRSessionModeType = 'inline', options: XRSessionStartOptions = {}) {
     if (this.session && this.sessionMode === mode) {
       return
     }
@@ -355,7 +593,7 @@ export class WebXRManager {
       throw new Error('当前浏览器不支持 WebXR')
     }
 
-    const initCandidates = this.getSessionInitCandidates(mode)
+    const initCandidates = this.getSessionInitCandidates(mode, options.preferHandTracking ?? false)
     let session: XRSession | null = null
     let lastError: unknown = null
 
@@ -395,6 +633,33 @@ export class WebXRManager {
     this.emitSessionChange(true)
   }
 
+  async refreshSessionInputMode(mode: XRInteractionMode) {
+    if (mode !== 'hand') {
+      return
+    }
+    if (!this.session || !this.sessionMode || this.sessionMode === 'inline') {
+      return
+    }
+    const hasHandSource = Array.from(this.session.inputSources).some((source) => Boolean(source.hand))
+    if (hasHandSource) {
+      return
+    }
+
+    const currentMode = this.sessionMode
+    await this.endSession()
+    try {
+      await this.startSession(currentMode, { preferHandTracking: true })
+    } catch (error) {
+      try {
+        await this.startSession(currentMode)
+      } catch {}
+      if (error instanceof Error) {
+        throw new Error(`手势模式启动失败：${error.message}`)
+      }
+      throw new Error('手势模式启动失败，请在 Quest 设置中启用 Hand Tracking 后重试')
+    }
+  }
+
   async endSession() {
     if (!this.session) {
       return
@@ -419,6 +684,7 @@ export class WebXRManager {
     }
     this.updateActiveInputFromSources()
     this.updateInputVisuals()
+    this.updateHandDebugMarkers()
     if (this.hudDirty) {
       this.drawHud()
     }
@@ -470,19 +736,42 @@ export class WebXRManager {
 
     for (let index = 0; index < MAX_CONTROLLER_COUNT; index += 1) {
       const controller = this.controllers[index]
+      const hand = this.hands[index]
       const source = inputSources[index]
       const gamepad = source?.gamepad
       const buttons = gamepad?.buttons.map((button) => button.value) ?? []
-      const hasHandTracking = Boolean(source?.hand)
-      const trackedNode = hasHandTracking ? this.hands[index] : controller
+      const wrist = this.getHandJointNode(hand, 'wrist')
+      const indexTip = this.getHandJointNode(hand, 'index-finger-tip')
+      const hasJointTracking = Boolean(wrist || indexTip)
+      const hasHandTracking = Boolean(source?.hand) || hasJointTracking
+      const trackedNode = hasHandTracking ? hand : controller
+      const trackedPosition = new THREE.Vector3()
+      const trackedQuaternion = new THREE.Quaternion()
+
+      if (hasHandTracking) {
+        if (wrist) {
+          wrist.getWorldPosition(trackedPosition)
+          wrist.getWorldQuaternion(trackedQuaternion)
+        } else if (indexTip) {
+          indexTip.getWorldPosition(trackedPosition)
+          indexTip.getWorldQuaternion(trackedQuaternion)
+        } else {
+          trackedNode.getWorldPosition(trackedPosition)
+          trackedNode.getWorldQuaternion(trackedQuaternion)
+        }
+      } else {
+        trackedNode.getWorldPosition(trackedPosition)
+        trackedNode.getWorldQuaternion(trackedQuaternion)
+      }
 
       states.push({
         index,
-        connected: Boolean(source),
-        handedness: source?.handedness ?? 'unknown',
+        connected: Boolean(source) || hasHandTracking,
+        handedness: source?.handedness ?? (index === 0 ? 'left' : 'right'),
         hasHandTracking,
-        position: trackedNode.position.clone(),
-        quaternion: trackedNode.quaternion.clone(),
+        handPinch: this.getHandPinchState(index, hasHandTracking),
+        position: trackedPosition,
+        quaternion: trackedQuaternion,
         axes: gamepad?.axes ? [...gamepad.axes] : [],
         buttons,
         selecting: (buttons[0] ?? 0) > 0.5,
@@ -510,6 +799,13 @@ export class WebXRManager {
     }
     for (const hand of this.hands) {
       this.scene.remove(hand)
+    }
+    for (const markers of this.handDebugMarkers) {
+      const tipMarkers = [markers.palm, markers.thumbTip, markers.indexTip, markers.middleTip, markers.ringTip]
+      for (const marker of tipMarkers) {
+        marker.geometry.dispose()
+        ;(marker.material as THREE.Material).dispose()
+      }
     }
   }
 }
