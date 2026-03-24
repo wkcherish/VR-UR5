@@ -150,12 +150,12 @@
     <joint joint1="right_driver_joint" joint2="left_driver_joint" polycoef="0 1 0 0 0" solimp="0.95 0.99 0.001" solref="0.005 1"/>
   </equality>
   <actuator>
-    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="elbow_joint" joint="elbow_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_1_joint" joint="wrist_1_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_2_joint" joint="wrist_2_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
-    <position name="wrist_3_joint" joint="wrist_3_joint" kp="100" kv="10" forcelimited="true" forcerange="0 150"/>
+    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-6.28319 6.28319" forcelimited="true" forcerange="-150 150"/>
+    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-6.28319 6.28319" forcelimited="true" forcerange="-150 150"/>
+    <position name="elbow_joint" joint="elbow_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-3.14159 3.14159" forcelimited="true" forcerange="-150 150"/>
+    <position name="wrist_1_joint" joint="wrist_1_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-6.28319 6.28319" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_2_joint" joint="wrist_2_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-6.28319 6.28319" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_3_joint" joint="wrist_3_joint" kp="100" kv="10" ctrllimited="true" ctrlrange="-6.28319 6.28319" forcelimited="true" forcerange="-28 28"/>
     <general name="fingers_actuator" tendon="split" biastype="affine" forcerange="-5 5" ctrlrange="0 255" gainprm="0.3137255 0 0" biasprm="0 -100 -10"/>
   </actuator>
   <sensor>
