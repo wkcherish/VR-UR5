@@ -28,8 +28,10 @@ export const useRobot = (options: UseRobotOptions = {}) => {
 
   let pollingTimer: number | null = null
   let reconnectTimer: number | null = null
+  let heartbeatTimer: number | null = null
   let stateSocket: WebSocket | null = null
   let realtimeConnected = false
+  let reconnectAttempt = 0
   let nextRealtimeRequestId = 1
   let pendingControlRequests = new Map<number, {
     resolve: (value: ControlResponse) => void
@@ -37,8 +39,10 @@ export const useRobot = (options: UseRobotOptions = {}) => {
     timeoutId: number
   }>()
 
-  const REALTIME_RECONNECT_MS = 500
+  const REALTIME_RECONNECT_BASE_MS = 500
+  const REALTIME_RECONNECT_MAX_MS = 5000
   const REALTIME_CONTROL_ACK_TIMEOUT_MS = 700
+  const REALTIME_HEARTBEAT_MS = 15000
 
   const toWsUrl = () => {
     const apiBase = resolveApiBaseUrl()
@@ -71,8 +75,29 @@ export const useRobot = (options: UseRobotOptions = {}) => {
     }
   }
 
+  const clearHeartbeatTimer = () => {
+    if (heartbeatTimer !== null) {
+      window.clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
+
+  const startHeartbeat = (socket: WebSocket) => {
+    clearHeartbeatTimer()
+    heartbeatTimer = window.setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return
+      }
+      try {
+        socket.send(JSON.stringify({ type: 'ping' }))
+      } catch {}
+    }, REALTIME_HEARTBEAT_MS)
+  }
+
   const stopRealtime = () => {
     clearReconnectTimer()
+    clearHeartbeatTimer()
+    reconnectAttempt = 0
     realtimeConnected = false
     setRealtimeControlTransport(null)
     for (const request of pendingControlRequests.values()) {
@@ -99,10 +124,15 @@ export const useRobot = (options: UseRobotOptions = {}) => {
       return
     }
     clearReconnectTimer()
+    const delay = Math.min(
+      REALTIME_RECONNECT_BASE_MS * (2 ** reconnectAttempt),
+      REALTIME_RECONNECT_MAX_MS,
+    )
+    reconnectAttempt += 1
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = null
       startRealtime()
-    }, REALTIME_RECONNECT_MS)
+    }, delay)
   }
 
   const applyRealtimeState = (payload: unknown) => {
@@ -162,8 +192,10 @@ export const useRobot = (options: UseRobotOptions = {}) => {
 
     socket.onopen = () => {
       realtimeConnected = true
+      reconnectAttempt = 0
       clearReconnectTimer()
       stopPolling()
+      startHeartbeat(socket)
       setRealtimeControlTransport(sendRealtimeControl)
     }
 
@@ -178,6 +210,9 @@ export const useRobot = (options: UseRobotOptions = {}) => {
         }
         if (payload.type === 'state') {
           applyRealtimeState(payload)
+          return
+        }
+        if (payload.type === 'pong') {
           return
         }
         if (payload.type === 'control_ack') {
@@ -236,6 +271,7 @@ export const useRobot = (options: UseRobotOptions = {}) => {
       if (stateSocket !== socket) {
         return
       }
+      clearHeartbeatTimer()
       stateSocket = null
       realtimeConnected = false
       setRealtimeControlTransport(null)

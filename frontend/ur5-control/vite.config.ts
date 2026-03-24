@@ -1,4 +1,4 @@
-import { defineConfig, type PreviewServer, type ResolvedServerUrls, type ViteDevServer } from 'vite'
+import { createLogger, defineConfig, type PreviewServer, type ResolvedServerUrls, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import path from 'path'
@@ -56,8 +56,25 @@ function compactNetworkUrlsPlugin() {
   }
 }
 
+const viteLogger = createLogger()
+const defaultViteErrorLogger = viteLogger.error.bind(viteLogger)
+
+viteLogger.error = (msg, options) => {
+  if (
+    typeof msg === 'string'
+    && msg.includes('[vite] ws proxy')
+    && msg.includes('ECONNRESET')
+  ) {
+    // Mobile devices may abruptly drop TLS sockets while switching network/power states.
+    // Treat this specific proxy noise as benign to keep dev logs readable.
+    return
+  }
+  defaultViteErrorLogger(msg, options)
+}
+
 // https://vite.dev/config/
 export default defineConfig({
+  customLogger: viteLogger,
   plugins: [vue(), basicSsl(), compactNetworkUrlsPlugin()],
   resolve: {
     alias: {
@@ -69,10 +86,15 @@ export default defineConfig({
     https: {},
     host: '0.0.0.0', // 允许局域网访问
     proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
+      '/api/ws': {
+        target: 'ws://127.0.0.1:8000',
         changeOrigin: true,
         ws: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },
