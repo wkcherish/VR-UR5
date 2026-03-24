@@ -320,35 +320,52 @@ frontend/ur5-control/
 
 ---
 
-#### Task 4.3: 实现基于 Quest 3 手柄的关节控制映射
+#### Task 4.3: 实现基于 Quest 3 手柄的关节与抓手控制映射
 
 **核心逻辑**：
-采用 **左手柄选择模式 + 右手柄执行动作** 的组合控制方案（参考用户定义映射）。
+采用 **左手柄选择关节组 + 右手柄摇杆执行 + 右手柄 Trigger 直接控制抓手** 的组合方案。这样既保留了双手分工，也让最常用的“抓取”动作落在主流 VR 应用最常见的 **右手 Trigger** 上，整体更符合 Quest 系列和大多数 VR 手柄交互习惯。
+
+**推荐交互分组**：
+- **左手 X**：控制大臂组（Shoulder Pan / Shoulder Lift）
+- **左手 Y**：控制前臂组（Elbow / Wrist 1）
+- **左手 Grip（侧键）**：控制手腕组（Wrist 2 / Wrist 3）
+- **左手 Trigger（扳机）**：进入精细模式，降低速度，便于微调
+- **右手 Trigger（扳机）**：直接控制抓手开合
+- **右手摇杆**：负责连续输入，不再承担抓手开合功能
 
 **技术实现细节**：
 1. **输入轮询循环**：
    - 在 `renderer.setAnimationLoop` 中每一帧获取 Gamepad 数据
-   - 获取左手柄按键状态 (Buttons) 和右手柄摇杆数据 (Axes)
+   - 获取左手柄按键状态 (Buttons)、右手柄摇杆数据 (Axes) 与右手柄 Trigger 模拟量
 
 2. **运动执行逻辑**：
    - 读取右手柄摇杆数据：`stickX = gamepad.axes[2]` (左右), `stickY = gamepad.axes[3]` (上下)
-   - **死区处理**：忽略绝对值小于 0.1 的输入
+   - **死区处理**：忽略绝对值小于 0.1 的输入，并建议对超出死区后的输入做线性重映射，避免刚越过死区时突然跳变
+   - **抓手输入**：读取右手柄 Trigger 值 `gripperValue = rightPad.buttons[0].value`
    - **映射规则**：
      - **底座控制 (Shoulder Pan)**: 按住左手柄 **X键** + 右手柄摇杆 **上下**
      - **肩部控制 (Shoulder Lift)**: 按住左手柄 **X键** + 右手柄摇杆 **左右**
      - **肘部控制 (Elbow)**: 按住左手柄 **Y键** + 右手柄摇杆 **上下**
-     - **腕部关节1 (Wrist 1)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **上下**
-     - **腕部关节2 (Wrist 2)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **左右**
-     - **手腕旋转 (Wrist 3)**: 按住左手柄 **Trigger键 (扳机)** + 右手柄摇杆 **左右**
+     - **腕部关节1 (Wrist 1)**: 按住左手柄 **Y键** + 右手柄摇杆 **左右**
+     - **腕部关节2 (Wrist 2)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **上下**
+     - **手腕旋转 (Wrist 3)**: 按住左手柄 **Grip键 (侧键)** + 右手柄摇杆 **左右**
+     - **抓手开合 (Gripper)**: 右手柄 **Trigger键 (扳机)** 直接映射到 `gripper_position`
 
-3. **指令发送**：
+3. **操作手感优化**：
+   - **抓取动作独立**：抓手不再占用左手模式键，避免“想抓取时还要切模式”
+   - **按关节组分层**：`X = 大臂`、`Y = 前臂`、`Grip = 手腕`，记忆成本更低
+   - **精细模式**：按住左手 Trigger 时，将角速度缩放到常规速度的 `0.3 ~ 0.5`
+
+4. **指令发送**：
    - 将计算出的角度增量应用到当前目标角度
-   - 通过 API/WebSocket 发送控制指令
+   - 将右手 Trigger 的模拟量同步映射为 `gripper_position`
+   - 在同一条控制消息中同时发送 `target_angles` 与 `gripper_position`
 
 **注意事项**：
-- ⚠️ **按键互斥**：处理同时按下多个功能键的情况（优先级策略：Trigger > Grip > Y > X）
-- ⚠️ **安全限位**：在前端严格限制目标角度在 UR5 物理限位内
-- ⚠️ **平滑处理**：对摇杆输入进行低通滤波，避免机械臂抖动
+- ⚠️ **模式优先级**：左手模式键建议按 `Grip > Y > X` 处理，左手 Trigger 作为精细模式可与任一模式叠加
+- ⚠️ **抓手方向校准**：建议定义为“扳机按得越深，抓手闭合越多”；若模型方向相反，只在输入适配层做一次反向映射
+- ⚠️ **安全限位**：在前端严格限制目标角度在 UR5 物理限位内，`gripper_position` 也应限制在后端约定范围内
+- ⚠️ **平滑处理**：对摇杆输入进行低通滤波，避免机械臂抖动；抓手输入可单独使用更缓的插值
 
 **关键代码参考**：
 ```typescript
@@ -356,30 +373,40 @@ frontend/ur5-control/
 const leftPad = leftController.gamepad;   // 左手柄
 const rightPad = rightController.gamepad; // 右手柄
 
-const stickX = rightPad.axes[2]; // 右手摇杆左右
-const stickY = rightPad.axes[3]; // 右手摇杆上下
+const stickX = applyDeadzone(rightPad.axes[2], 0.1); // 右手摇杆左右
+const stickY = applyDeadzone(rightPad.axes[3], 0.1); // 右手摇杆上下
+const precisionMode = leftPad.buttons[0].value > 0.1; // 左 Trigger
+const speed = baseSpeed * (precisionMode ? 0.4 : 1.0);
 
-// 优先级：Trigger > Grip > Y > X
-if (leftPad.buttons[0].pressed) { // Trigger (扳机)
-    // 腕部旋转 (Wrist 3) - 左右推
+// 右 Trigger 直接控制抓手开合
+const triggerValue = rightPad.buttons[0].value;
+targetJoints.gripper_position = mapTriggerToGripper(triggerValue);
+
+// 左手模式优先级：Grip > Y > X
+if (leftPad.buttons[1].pressed) { // Grip (侧键)
+    targetJoints.wrist2 += stickY * speed;
     targetJoints.wrist3 += stickX * speed;
-} 
-else if (leftPad.buttons[1].pressed) { // Grip (侧键)
-    // 腕部关节1 (Wrist 1) - 上下推
-    targetJoints.wrist1 += stickY * speed;
-    // 腕部关节2 (Wrist 2) - 左右推
-    targetJoints.wrist2 += stickX * speed;
 }
-else if (leftPad.buttons[5].pressed) { // Y Button (通常 index 5)
-    // 肘部控制 (Elbow) - 上下推
+else if (leftPad.buttons[5].pressed) { // Y Button
     targetJoints.elbow += stickY * speed;
-} 
-else if (leftPad.buttons[4].pressed) { // X Button (通常 index 4)
-    // 底座控制 (Shoulder Pan) - 上下推
+    targetJoints.wrist1 += stickX * speed;
+}
+else if (leftPad.buttons[4].pressed) { // X Button
     targetJoints.shoulderPan += stickY * speed;
-    // 肩部控制 (Shoulder Lift) - 左右推
     targetJoints.shoulderLift += stickX * speed;
 }
+
+sendControl({
+    target_angles: [
+        targetJoints.shoulderPan,
+        targetJoints.shoulderLift,
+        targetJoints.elbow,
+        targetJoints.wrist1,
+        targetJoints.wrist2,
+        targetJoints.wrist3,
+    ],
+    gripper_position: targetJoints.gripper_position,
+});
 ```
 
 ---

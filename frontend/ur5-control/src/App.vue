@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import RobotViewer from './components/RobotViewer.vue'
 import { useRobot } from '@/composables/useRobot'
-import { JOINT_ORDER } from '@/types/robot'
+import { JOINT_LIMITS, JOINT_ORDER } from '@/types/robot'
 import type { JointName } from '@/types/robot'
 
 const viewerRef = ref<InstanceType<typeof RobotViewer> | null>(null)
@@ -12,8 +12,11 @@ const {
   reset,
   setTargetAngle,
   setTargetGripperPosition,
+  markLocalControlActivity,
   isConnected,
   isLoading,
+  isLocalControlling,
+  shouldHoldLocalPose,
   error,
   currentState,
   targetAngles,
@@ -21,7 +24,6 @@ const {
   lastUpdatedAt,
 } = useRobot({ pollingInterval: 50 })
 
-const COMMAND_DEBOUNCE_MS = 80
 const GRIPPER_MIN = 0
 const GRIPPER_MAX = 0.9
 const GRIPPER_STEP = 0.01
@@ -33,11 +35,11 @@ const GRIPPER_JOINT_NAMES = [
   'left_follower_joint',
   'right_follower_joint',
 ] as const
-let queuedCommandTimer: number | null = null
 
 const jointList = computed(() =>
   JOINT_ORDER.map((jointName) => ({
     name: jointName,
+    limit: JOINT_LIMITS[jointName],
     target: targetAngles.value[jointName],
     current:
       currentState.value?.joints.find((joint) => joint.joint_name === jointName)?.position ?? targetAngles.value[jointName],
@@ -59,30 +61,11 @@ const gripperCurrent = computed(() => {
   return value
 })
 
-const clearQueuedCommand = () => {
-  if (queuedCommandTimer !== null) {
-    window.clearTimeout(queuedCommandTimer)
-    queuedCommandTimer = null
-  }
-}
-
-const handleSendCommand = async () => {
+const handleSendCommand = async (angles?: Partial<Record<JointName, number>>, gripperPosition?: number) => {
   if (!isConnected.value) {
     return
   }
-  clearQueuedCommand()
-  await sendCommand()
-}
-
-const queueCommand = () => {
-  if (!isConnected.value) {
-    return
-  }
-  clearQueuedCommand()
-  queuedCommandTimer = window.setTimeout(() => {
-    queuedCommandTimer = null
-    void handleSendCommand()
-  }, COMMAND_DEBOUNCE_MS)
+  await sendCommand(angles, gripperPosition)
 }
 
 const appendGripperJoints = (jointAngles: Record<string, number>, gripperPosition: number) => {
@@ -101,20 +84,25 @@ const previewViewerFromTargets = () => {
 }
 
 const handleAngleInput = (jointName: JointName, value: number) => {
+  markLocalControlActivity()
   setTargetAngle(jointName, value)
   previewViewerFromTargets()
-  queueCommand()
+  void handleSendCommand({ [jointName]: targetAngles.value[jointName] })
 }
 
 const handleGripperInput = (value: number) => {
+  markLocalControlActivity()
   setTargetGripperPosition(value)
   previewViewerFromTargets()
-  queueCommand()
+  void handleSendCommand(undefined, targetGripperPosition.value)
 }
 
 watch(
   () => [currentState.value?.joints, currentState.value?.gripper_position] as const,
   ([joints, gripperPosition]) => {
+    if (shouldHoldLocalPose.value || isLocalControlling.value) {
+      return
+    }
     if (!joints?.length && (gripperPosition === null || gripperPosition === undefined)) {
       return
     }
@@ -132,10 +120,6 @@ onMounted(async () => {
   if (!isConnected.value) {
     await connect()
   }
-})
-
-onUnmounted(() => {
-  clearQueuedCommand()
 })
 </script>
 
@@ -155,12 +139,11 @@ onUnmounted(() => {
           <input
             :value="joint.target"
             type="range"
-            min="-3.1416"
-            max="3.1416"
+            :min="joint.limit.lower"
+            :max="joint.limit.upper"
             step="0.01"
             :disabled="!isConnected || isLoading"
             @input="handleAngleInput(joint.name, Number(($event.target as HTMLInputElement).value))"
-            @change="handleSendCommand"
           />
           <span class="joint-value">
             目标 {{ joint.target.toFixed(2) }} rad / 当前 {{ joint.current.toFixed(2) }} rad
@@ -176,7 +159,6 @@ onUnmounted(() => {
             :step="GRIPPER_STEP"
             :disabled="!isConnected || isLoading"
             @input="handleGripperInput(Number(($event.target as HTMLInputElement).value))"
-            @change="handleSendCommand"
           />
           <span class="joint-value">
             目标 {{ targetGripperPosition.toFixed(2) }} rad / 当前 {{ gripperCurrent.toFixed(2) }} rad
