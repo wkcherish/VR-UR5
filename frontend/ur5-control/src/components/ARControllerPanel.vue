@@ -10,7 +10,7 @@ const emit = defineEmits<{
   controllerFrame: [payload: { active: boolean; controllers: XRControllerState[] }]
 }>()
 
-const isSupported = ref(false)
+const isSupported = ref({ ar: false, vr: false })
 const checkingSupport = ref(false)
 const isSessionActive = ref(false)
 const statusMessage = ref('')
@@ -47,15 +47,15 @@ const bindSessionListener = () => {
 
 const checkSupport = async () => {
   if (!props.manager) {
-    isSupported.value = false
+    isSupported.value = { ar: false, vr: false }
     return
   }
   checkingSupport.value = true
   try {
     isSupported.value = await props.manager.checkSupport()
-    statusMessage.value = isSupported.value ? '检测到 immersive-ar 支持' : '当前设备不支持 immersive-ar'
+    statusMessage.value = isSupported.value.ar ? '检测到 immersive-ar 支持' : '当前设备不支持 immersive-ar'
   } catch (error) {
-    isSupported.value = false
+    isSupported.value = { ar: false, vr: false }
     statusMessage.value = error instanceof Error ? error.message : 'WebXR 支持检测失败'
   } finally {
     checkingSupport.value = false
@@ -67,7 +67,7 @@ const enterAR = async () => {
     return
   }
   try {
-    await props.manager.startSession()
+    await props.manager.startSession('immersive-ar')
     isSessionActive.value = true
     statusMessage.value = '已进入 AR 模式'
   } catch (error) {
@@ -113,11 +113,11 @@ onUnmounted(() => {
 <template>
   <section class="ar-panel">
     <h2>AR 控制</h2>
-    <p>支持状态：{{ checkingSupport ? '检测中...' : isSupported ? '支持' : '不支持' }}</p>
+    <p>支持状态：{{ checkingSupport ? '检测中...' : isSupported.ar ? '支持' : '不支持' }}</p>
     <p>会话状态：{{ isSessionActive ? '已进入' : '未进入' }}</p>
     <p v-if="statusMessage" class="ar-status">{{ statusMessage }}</p>
     <div class="ar-actions">
-      <button type="button" :disabled="!isSupported || isSessionActive" @click="enterAR">进入 AR 模式</button>
+      <button type="button" :disabled="!isSupported.ar || isSessionActive" @click="enterAR">进入 AR 模式</button>
       <button type="button" :disabled="!isSessionActive" @click="exitAR">退出 AR 模式</button>
       <button type="button" :disabled="!manager" @click="checkSupport">重新检测</button>
     </div>

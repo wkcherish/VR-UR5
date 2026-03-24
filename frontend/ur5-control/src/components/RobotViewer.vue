@@ -8,6 +8,8 @@ import type { RobotModel } from '../utils/urdf/robotLoader'
 interface RobotViewerExpose {
   updateJoints: (targetAngles: Record<string, number>) => void
   resetCamera: () => void
+  setRenderHook: (hook: (() => void) | null) => void
+  getSceneManager: () => SceneManager | null
 }
 
 const props = withDefaults(
@@ -20,6 +22,10 @@ const props = withDefaults(
     useCollisionMesh: false,
   },
 )
+
+const emit = defineEmits<{
+  ready: [sceneManager: SceneManager]
+}>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const loading = ref(true)
@@ -44,6 +50,12 @@ const resetCamera = () => {
   sceneManager.controls.target.set(0, 0.6, 0)
   sceneManager.controls.update()
 }
+
+const setRenderHook = (hook: (() => void) | null) => {
+  sceneManager?.setRenderHook(hook)
+}
+
+const getSceneManager = () => sceneManager
 
 const handleResize = () => {
   sceneManager?.resize()
@@ -78,6 +90,7 @@ onMounted(async () => {
   }
   sceneManager = new SceneManager(containerRef.value)
   sceneManager.start()
+  emit('ready', sceneManager)
   window.addEventListener('resize', handleResize)
   await initRobot()
 })
@@ -91,6 +104,7 @@ watch(
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  sceneManager?.setRenderHook(null)
   if (sceneManager && robotRoot) {
     sceneManager.scene.remove(robotRoot)
   }
@@ -103,6 +117,8 @@ onUnmounted(() => {
 defineExpose<RobotViewerExpose>({
   updateJoints,
   resetCamera,
+  setRenderHook,
+  getSceneManager,
 })
 </script>
 

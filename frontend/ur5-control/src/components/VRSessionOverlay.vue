@@ -13,6 +13,8 @@ const props = defineProps<{
   controlSummary: string
   directionLabel: string
   highlightedLabels: string[]
+  connectionLabel: string
+  jointSummary: string
 }>()
 
 const emit = defineEmits<{
@@ -38,7 +40,7 @@ const formatHandedness = (handedness: XRControllerState['handedness']) => {
     <header class="vr-overlay__topbar">
       <div class="vr-overlay__title">
         <span>VR 模式</span>
-        <strong>Quest 3 手柄交互已启用</strong>
+        <strong>Quest 3 手柄 / 手势交互已启用</strong>
       </div>
       <div class="vr-overlay__actions">
         <button
@@ -63,14 +65,21 @@ const formatHandedness = (handedness: XRControllerState['handedness']) => {
       <article class="vr-overlay__card vr-overlay__card--wide">
         <span>当前输入</span>
         <strong>{{ activeInput ?? '未检测' }}</strong>
+        <p>{{ connectionLabel }}</p>
         <p>{{ controlSummary }}</p>
         <p>{{ directionLabel }}</p>
+        <p>关节目标：{{ jointSummary }}</p>
         <p>高亮关节：{{ highlightedLabels.join(' / ') || '暂无' }}</p>
       </article>
 
       <article v-for="controller in connectedControllers" :key="controller.index" class="vr-overlay__card">
         <span>{{ formatHandedness(controller.handedness) }}</span>
         <strong>{{ controller.hasHandTracking ? '手部追踪可用' : '控制器在线' }}</strong>
+        <p v-if="controller.handPinch">
+          Pinch(I/M/R): {{ controller.handPinch.index.toFixed(2) }} /
+          {{ controller.handPinch.middle.toFixed(2) }} /
+          {{ controller.handPinch.ring.toFixed(2) }}
+        </p>
         <p>Axes: {{ controller.axes.map((axis) => axis.toFixed(2)).join(', ') || '--' }}</p>
         <p>Buttons: {{ controller.buttons.map((button) => button.toFixed(2)).join(', ') || '--' }}</p>
       </article>
