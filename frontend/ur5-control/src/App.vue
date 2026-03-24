@@ -48,12 +48,12 @@ const GRIPPER_JOINT_NAMES = [
 ] as const
 
 const JOINT_LABELS: Record<JointName, string> = {
-  shoulder_pan_joint: 'Shoulder Pan',
-  shoulder_lift_joint: 'Shoulder Lift',
-  elbow_joint: 'Elbow',
-  wrist_1_joint: 'Wrist 1',
-  wrist_2_joint: 'Wrist 2',
-  wrist_3_joint: 'Wrist 3',
+  shoulder_pan_joint: '底座旋转关节',
+  shoulder_lift_joint: '肩部抬升关节',
+  elbow_joint: '肘部关节',
+  wrist_1_joint: '手腕一关节',
+  wrist_2_joint: '手腕二关节',
+  wrist_3_joint: '手腕三关节',
 }
 
 const jointList = computed(() =>
@@ -399,65 +399,87 @@ onUnmounted(() => {
       />
     </section>
     <aside v-if="!isVrImmersiveActive" class="control-panel">
-      <h1>UR5 3D 可视化</h1>
-      <p>连接状态：{{ isConnected ? '已连接' : '未连接' }}</p>
-      <p>最后更新：{{ lastUpdatedLabel }}</p>
-      <div class="xr-quick">
-        <p class="xr-quick__status">XR 会话：{{ xrSessionMode ?? '未进入' }}</p>
+      <div class="control-header">
+        <h1 class="control-title">基于AR的UR5控制运动</h1>
+        <div class="control-meta">
+          <p class="control-meta__item">
+            <span>连接状态</span>
+            <strong :class="{ 'is-online': isConnected, 'is-offline': !isConnected }">
+              {{ isConnected ? '已连接' : '未连接' }}
+            </strong>
+          </p>
+          <p class="control-meta__item">
+            <span>最后更新</span>
+            <strong>{{ lastUpdatedLabel }}</strong>
+          </p>
+        </div>
+      </div>
+      <div class="panel-card xr-quick">
         <div class="xr-quick__actions">
           <button
             type="button"
+            class="xr-btn xr-btn--enter"
             :disabled="!xrManager || (isXRSessionActive && xrSessionMode === 'immersive-vr')"
             @click="enterXRMode('immersive-vr')"
           >
             进入VR模式
           </button>
-          <button type="button" :disabled="!isXRSessionActive" @click="exitXRSession">退出VR模式</button>
+          <button
+            type="button"
+            class="xr-btn xr-btn--exit"
+            :disabled="!isXRSessionActive"
+            @click="exitXRSession"
+          >
+            退出VR模式
+          </button>
         </div>
-        <p v-if="xrStatusMessage" class="xr-quick__hint">{{ xrStatusMessage }}</p>
       </div>
-      <p v-if="error" class="error-text">{{ error }}</p>
-      <div class="joint-list">
-        <label
-          v-for="joint in jointList"
-          :key="joint.name"
-          class="joint-item"
-          :class="{ 'is-highlighted': highlightedJointSet.has(joint.name) }"
-        >
-          <span>{{ joint.name }}</span>
-          <input
-            :value="joint.target"
-            type="range"
-            :min="joint.limit.lower"
-            :max="joint.limit.upper"
-            step="0.01"
-            :disabled="!isConnected || isLoading"
-            @input="handleAngleInput(joint.name, Number(($event.target as HTMLInputElement).value))"
-          />
-          <span class="joint-value">
-            目标 {{ joint.target.toFixed(2) }} rad / 当前 {{ joint.current.toFixed(2) }} rad
-          </span>
-        </label>
-        <label class="joint-item">
-          <span>gripper_joint</span>
-          <input
-            :value="targetGripperPosition"
-            type="range"
-            :min="GRIPPER_MIN"
-            :max="GRIPPER_MAX"
-            :step="GRIPPER_STEP"
-            :disabled="!isConnected || isLoading"
-            @input="handleGripperInput(Number(($event.target as HTMLInputElement).value))"
-          />
-          <span class="joint-value">
-            目标 {{ targetGripperPosition.toFixed(2) }} rad / 当前 {{ gripperCurrent.toFixed(2) }} rad
-          </span>
-        </label>
+      <p v-if="error" class="error-text panel-error">{{ error }}</p>
+      <div class="panel-card panel-card--joints">
+        <div class="joint-list">
+          <label
+            v-for="joint in jointList"
+            :key="joint.name"
+            class="joint-item"
+            :class="{ 'is-highlighted': highlightedJointSet.has(joint.name) }"
+          >
+            <span>{{ JOINT_LABELS[joint.name] }}</span>
+            <input
+              :value="joint.target"
+              type="range"
+              :min="joint.limit.lower"
+              :max="joint.limit.upper"
+              step="0.01"
+              :disabled="!isConnected || isLoading"
+              @input="handleAngleInput(joint.name, Number(($event.target as HTMLInputElement).value))"
+            />
+            <span class="joint-value">
+              目标 {{ joint.target.toFixed(2) }} rad / 当前 {{ joint.current.toFixed(2) }} rad
+            </span>
+          </label>
+          <label class="joint-item">
+            <span>夹抓</span>
+            <input
+              :value="targetGripperPosition"
+              type="range"
+              :min="GRIPPER_MIN"
+              :max="GRIPPER_MAX"
+              :step="GRIPPER_STEP"
+              :disabled="!isConnected || isLoading"
+              @input="handleGripperInput(Number(($event.target as HTMLInputElement).value))"
+            />
+            <span class="joint-value">
+              目标 {{ targetGripperPosition.toFixed(2) }} rad / 当前 {{ gripperCurrent.toFixed(2) }} rad
+            </span>
+          </label>
+        </div>
       </div>
-      <div class="panel-actions">
-        <button type="button" :disabled="isConnected || isLoading" @click="connect">连接后端</button>
-        <button type="button" :disabled="!isConnected || isLoading" @click="reset">重置仿真</button>
-        <button type="button" @click="viewerRef?.resetCamera()">重置视角</button>
+      <div class="panel-card panel-card--actions">
+        <div class="panel-actions">
+          <button type="button" :disabled="isConnected || isLoading" @click="connect">连接后端</button>
+          <button type="button" :disabled="!isConnected || isLoading" @click="reset">重置仿真</button>
+          <button type="button" @click="viewerRef?.resetCamera()">重置视角</button>
+        </div>
       </div>
     </aside>
   </main>
