@@ -64,7 +64,7 @@ const JOINT_LABELS: Record<JointName, string> = {
 const getDefaultXRControlSummary = (mode: XRInteractionMode) =>
   mode === 'controller'
     ? '按住左手 Grip / Y / X 选择关节组'
-    : '左手捏合选组，右手抓握并移动（抓握强度同步夹爪）'
+    : '双手：左手捏合选组，右手食指捏合拖拽；单手：无名指切组 + 食指拖拽'
 
 const getDefaultXRDirectionLabel = (mode: XRInteractionMode) =>
   mode === 'controller' ? '摇杆静止' : '手部静止'
@@ -203,11 +203,13 @@ const refreshXRSupport = async () => {
   }
 }
 
-const updateXRInputMode = (mode: XRInteractionMode) => {
+const updateXRInputMode = async (mode: XRInteractionMode) => {
+  const manager = xrManager.value
   xrInputMode.value = mode
-  xrManager.value?.setInputMode(mode)
+  manager?.setInputMode(mode)
   if (mode === 'hand') {
-    xrHandState.activeGroup = null
+    xrHandState.activeGroup = 'wrist'
+    xrHandState.groupCycleLatched = false
     xrHandState.isDragging = false
     xrHandState.dragReleaseAt = null
     xrHandState.lastTrackedAt = 0
@@ -215,6 +217,20 @@ const updateXRInputMode = (mode: XRInteractionMode) => {
     xrHandState.previousRightY = null
   }
   resetXRFeedback(mode)
+  if (!manager?.isSessionActive()) {
+    return
+  }
+  if (mode !== 'hand') {
+    return
+  }
+  try {
+    xrStatusMessage.value = '正在切换到手势追踪模式...'
+    await manager.refreshSessionInputMode(mode)
+    xrStatusMessage.value = '手势追踪已就绪'
+    lastXRCommandAt = 0
+  } catch (nextError) {
+    xrStatusMessage.value = nextError instanceof Error ? nextError.message : '手势模式切换失败'
+  }
 }
 
 const enterXRMode = async (mode: XRSessionModeType) => {
@@ -228,7 +244,7 @@ const enterXRMode = async (mode: XRSessionModeType) => {
     return
   }
   try {
-    await manager.startSession(mode)
+    await manager.startSession(mode, { preferHandTracking: xrInputMode.value === 'hand' })
     xrSessionMode.value = manager.getSessionMode()
     xrStatusMessage.value = `已进入 ${mode} 会话`
     lastXRCommandAt = 0

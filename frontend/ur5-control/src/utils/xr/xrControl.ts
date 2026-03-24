@@ -27,6 +27,7 @@ export interface XRHandControlState {
   lastTrackedAt: number
   gripper: number
   activeGroup: XRHandControlGroup | null
+  groupCycleLatched: boolean
 }
 
 export interface XRControlOptions {
@@ -70,17 +71,17 @@ const DEFAULT_OPTIONS: Required<XRControlOptions> = {
 }
 
 const DEFAULT_HAND_OPTIONS: Required<XRHandControlOptions> = {
-  movementDeadzone: 0.0026,
-  movementGain: 3.2,
-  maxFrameMovement: 0.022,
+  movementDeadzone: 0.0012,
+  movementGain: 4.1,
+  maxFrameMovement: 0.03,
   movementSmoothing: 0.32,
-  movePinchEngageThreshold: 0.52,
-  movePinchReleaseThreshold: 0.28,
+  movePinchEngageThreshold: 0.38,
+  movePinchReleaseThreshold: 0.2,
   dragHoldMs: 180,
   trackingGraceMs: 280,
   precisionScale: 0.42,
-  groupPinchThreshold: 0.62,
-  precisionPinchThreshold: 0.62,
+  groupPinchThreshold: 0.56,
+  precisionPinchThreshold: 0.72,
   gripperPinchThreshold: 0.2,
   gripperSmoothing: 0.2,
   gripperMin: 0,
@@ -157,22 +158,22 @@ const HAND_GROUP_LABELS: Record<XRHandControlGroup, string> = {
   wrist: '手势腕部组控制 (Wrist 2 / Wrist 3)',
 }
 
-const getRightGrabStrength = (pinch: { index: number; middle: number; ring: number }) =>
-  clamp(pinch.index * 0.7 + pinch.middle * 0.2 + pinch.ring * 0.1, 0, 1)
-
 const resolveHandGroup = (
   leftHand: XRControllerState,
   threshold: number,
+  includeIndex = true,
 ): XRHandControlGroup | null => {
   const pinches = leftHand.handPinch
   if (!pinches) {
     return null
   }
   const candidates: Array<{ group: XRHandControlGroup; strength: number }> = [
-    { group: 'wrist', strength: pinches.index },
     { group: 'forearm', strength: pinches.middle },
     { group: 'shoulder', strength: pinches.ring },
   ]
+  if (includeIndex) {
+    candidates.push({ group: 'wrist', strength: pinches.index })
+  }
   let selected: XRHandControlGroup | null = null
   let maxStrength = threshold
   for (const candidate of candidates) {
@@ -182,6 +183,16 @@ const resolveHandGroup = (
     }
   }
   return selected
+}
+
+const nextHandGroup = (current: XRHandControlGroup | null): XRHandControlGroup => {
+  if (!current || current === 'wrist') {
+    return 'forearm'
+  }
+  if (current === 'forearm') {
+    return 'shoulder'
+  }
+  return 'wrist'
 }
 
 const createUpdates = (
@@ -214,7 +225,8 @@ export const createXRHandControlState = (initialGripper = 0.8): XRHandControlSta
   dragReleaseAt: null,
   lastTrackedAt: 0,
   gripper: initialGripper,
-  activeGroup: null,
+  activeGroup: 'wrist',
+  groupCycleLatched: false,
 })
 
 export const resolveXRControllerCommand = (
@@ -317,8 +329,10 @@ export const resolveXRHandCommand = (
   const now = performance.now()
   const leftHand = getTrackedHandByHandedness(controllers, 'left')
   const rightHand = getTrackedHandByHandedness(controllers, 'right')
+  const primaryHand = rightHand ?? leftHand
+  const hasDualHand = Boolean(leftHand && rightHand)
 
-  if (!leftHand || !rightHand || !leftHand.handPinch || !rightHand.handPinch) {
+  if (!primaryHand || !primaryHand.handPinch) {
     const recentlyTracked = handState.lastTrackedAt > 0 && now - handState.lastTrackedAt <= config.trackingGraceMs
     handState.moveX = lowPass(handState.moveX, 0, config.movementSmoothing)
     handState.moveY = lowPass(handState.moveY, 0, config.movementSmoothing)
@@ -327,12 +341,13 @@ export const resolveXRHandCommand = (
       handState.dragReleaseAt = null
       handState.previousRightX = null
       handState.previousRightY = null
+      handState.groupCycleLatched = false
     }
     handState.gripper = lowPass(handState.gripper, currentGripperPosition, config.gripperSmoothing)
     return {
       updates: {},
       highlightedJoints: [],
-      summary: recentlyTracked ? '手部追踪短暂丢失，保持当前控制' : '等待双手手部追踪',
+      summary: recentlyTracked ? '手部追踪短暂丢失，保持当前控制' : '等待手部追踪',
       directionLabel: recentlyTracked ? '请保持手部在视野内' : '未检测到完整手势输入',
       gripperPosition: clamp(handState.gripper, config.gripperMin, config.gripperMax),
       hasCommand: false,
@@ -340,19 +355,34 @@ export const resolveXRHandCommand = (
   }
   handState.lastTrackedAt = now
 
-  const selectedGroup = resolveHandGroup(leftHand, config.groupPinchThreshold)
-  if (selectedGroup) {
-    handState.activeGroup = selectedGroup
+  if (!handState.activeGroup) {
+    handState.activeGroup = 'wrist'
   }
 
-  const rightGrabStrength = getRightGrabStrength(rightHand.handPinch)
-  if (!handState.isDragging && rightGrabStrength >= config.movePinchEngageThreshold) {
+  if (hasDualHand && leftHand?.handPinch) {
+    const selectedGroup = resolveHandGroup(leftHand, config.groupPinchThreshold, true)
+    if (selectedGroup) {
+      handState.activeGroup = selectedGroup
+    }
+    handState.groupCycleLatched = false
+  } else {
+    const cyclePinch = primaryHand.handPinch.ring
+    if (cyclePinch >= config.groupPinchThreshold && !handState.groupCycleLatched) {
+      handState.activeGroup = nextHandGroup(handState.activeGroup)
+      handState.groupCycleLatched = true
+    } else if (cyclePinch <= config.movePinchReleaseThreshold) {
+      handState.groupCycleLatched = false
+    }
+  }
+
+  const dragPinchStrength = clamp(primaryHand.handPinch.index, 0, 1)
+  if (!handState.isDragging && dragPinchStrength >= config.movePinchEngageThreshold) {
     handState.isDragging = true
     handState.dragReleaseAt = null
-    handState.previousRightX = rightHand.position.x
-    handState.previousRightY = rightHand.position.y
+    handState.previousRightX = primaryHand.position.x
+    handState.previousRightY = primaryHand.position.y
   } else if (handState.isDragging) {
-    if (rightGrabStrength <= config.movePinchReleaseThreshold) {
+    if (dragPinchStrength <= config.movePinchReleaseThreshold) {
       if (handState.dragReleaseAt === null) {
         handState.dragReleaseAt = now
       } else if (now - handState.dragReleaseAt >= config.dragHoldMs) {
@@ -373,10 +403,10 @@ export const resolveXRHandCommand = (
     && handState.previousRightX !== null
     && handState.previousRightY !== null
   ) {
-    rawMoveX = rightHand.position.x - handState.previousRightX
-    rawMoveY = rightHand.position.y - handState.previousRightY
-    handState.previousRightX = rightHand.position.x
-    handState.previousRightY = rightHand.position.y
+    rawMoveX = primaryHand.position.x - handState.previousRightX
+    rawMoveY = primaryHand.position.y - handState.previousRightY
+    handState.previousRightX = primaryHand.position.x
+    handState.previousRightY = primaryHand.position.y
   } else {
     handState.previousRightX = null
     handState.previousRightY = null
@@ -394,16 +424,18 @@ export const resolveXRHandCommand = (
   handState.moveX = smoothMoveX
   handState.moveY = smoothMoveY
 
-  const precisionMode = rightHand.handPinch.ring >= config.precisionPinchThreshold
+  const precisionMode = hasDualHand && primaryHand.handPinch.ring >= config.precisionPinchThreshold
   const speedScale = config.movementGain * (precisionMode ? config.precisionScale : 1)
   const moveX = smoothMoveX * speedScale
   const moveY = smoothMoveY * speedScale
   const directionLabel = handState.isDragging
     ? getHandDirectionLabel(smoothMoveX, smoothMoveY)
-    : '右手抓握后移动'
+    : (hasDualHand ? '右手食指捏合后移动' : '食指捏合后移动')
 
   let highlightedJoints: JointName[] = []
-  let summary = '左手捏合食指/中指/无名指选择关节组'
+  let summary = hasDualHand
+    ? '左手食/中/无名指捏合选组，右手食指捏合拖拽'
+    : '单手模式：无名指轻捏切换组，食指捏合拖拽'
   let updates: Partial<JointAngles> = {}
 
   if (handState.activeGroup === 'wrist' && handState.isDragging) {
@@ -434,10 +466,13 @@ export const resolveXRHandCommand = (
       shoulder_lift_joint: moveX,
     })
   } else if (handState.activeGroup) {
-    summary = `${HAND_GROUP_LABELS[handState.activeGroup]} 已选中，右手抓握并移动`
+    summary = hasDualHand
+      ? `${HAND_GROUP_LABELS[handState.activeGroup]} 已选中，右手食指捏合并移动`
+      : `${HAND_GROUP_LABELS[handState.activeGroup]} 已选中，食指捏合并移动`
   }
 
-  const mappedGrab = applyDeadzone(rightGrabStrength, config.gripperPinchThreshold)
+  const gripperPinchStrength = clamp(primaryHand.handPinch.middle, 0, 1)
+  const mappedGrab = applyDeadzone(gripperPinchStrength, config.gripperPinchThreshold)
   const mappedGripper = config.gripperMin + mappedGrab * (config.gripperMax - config.gripperMin)
   handState.gripper = lowPass(handState.gripper, mappedGripper, config.gripperSmoothing)
   const gripperPosition = clamp(handState.gripper, config.gripperMin, config.gripperMax)

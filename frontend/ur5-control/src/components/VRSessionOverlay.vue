@@ -24,14 +24,16 @@ const emit = defineEmits<{
 
 const connectedControllers = computed(() => props.controllers.filter((controller) => controller.connected))
 
-const formatHandedness = (handedness: XRControllerState['handedness']) => {
+const formatHandedness = (controller: XRControllerState) => {
+  const suffix = controller.hasHandTracking ? '手' : '手柄'
+  const { handedness } = controller
   if (handedness === 'left') {
-    return '左手柄'
+    return `左${suffix}`
   }
   if (handedness === 'right') {
-    return '右手柄'
+    return `右${suffix}`
   }
-  return '未知手柄'
+  return `未知${suffix}`
 }
 </script>
 
@@ -70,10 +72,11 @@ const formatHandedness = (handedness: XRControllerState['handedness']) => {
         <p>{{ directionLabel }}</p>
         <p>关节目标：{{ jointSummary }}</p>
         <p>高亮关节：{{ highlightedLabels.join(' / ') || '暂无' }}</p>
+        <p v-if="inputMode === 'hand'">手势提示：食指捏合拖拽，双手时左手捏合可切关节组。</p>
       </article>
 
       <article v-for="controller in connectedControllers" :key="controller.index" class="vr-overlay__card">
-        <span>{{ formatHandedness(controller.handedness) }}</span>
+        <span>{{ formatHandedness(controller) }}</span>
         <strong>{{ controller.hasHandTracking ? '手部追踪可用' : '控制器在线' }}</strong>
         <p v-if="controller.handPinch">
           Pinch(I/M/R): {{ controller.handPinch.index.toFixed(2) }} /
