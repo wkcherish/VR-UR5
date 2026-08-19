@@ -1,4 +1,4 @@
-# AR-UR5
+# VR-UR5
 
 基于 MuJoCo + FastAPI + Vue 3 + WebXR 的 UR5 机械臂仿真与交互控制项目。  
 项目支持桌面端控制与 Quest 3 浏览器访问，进入 VR 模式后可通过手柄控制机械臂关节与夹抓。
